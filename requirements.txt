@@ -2,3 +2,11 @@ PyYaml
 OmegaConf
 typing
 time
+os
+json
+wave
+contextlib
+pydub
+webrtcvad 
+collections 
+logging
