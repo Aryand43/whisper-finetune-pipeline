@@ -8,17 +8,24 @@ import csv
 import wandb
 from datasets import load_dataset
 import os
+from dotenv import load_dotenv
+from transformers import AutoConfig
+load_dotenv()  # Load env vars from .env file
 
+import wandb
+base_model_name = "openai/whisper-medium"
+dataset = load_dataset("i4ds/spc_r", split="test")
 # -----------------------------
 # Model Loader (HF-style folder)
 # -----------------------------
 def load_model_and_processor(model_dir: str):
-    processor = WhisperProcessor.from_pretrained(model_dir)
-    model = WhisperForConditionalGeneration.from_pretrained(
-        model_dir,
-        torch_dtype=torch.float16,
-        device_map="auto"
-    )
+    processor = WhisperProcessor.from_pretrained("openai/whisper-medium")
+    
+    config = AutoConfig.from_pretrained("openai/whisper-medium")
+    model = WhisperForConditionalGeneration(config)
+    model.load_state_dict(torch.load(os.path.join(model_dir, "aggregated_model.bin")))
+    
+    model.to("cuda" if torch.cuda.is_available() else "cpu")
     return model, processor
 
 # -----------------------------
@@ -34,7 +41,8 @@ def average_checkpoints(model_paths, weights=None, save_path="aggregated_model.b
     avg_state_dict = None
 
     for model_path, weight in zip(model_paths, weights):
-        state_dict = torch.load(model_path, map_location="cpu")
+        loaded = torch.load(model_path, map_location="cpu")
+        state_dict = loaded["state_dict"] if "state_dict" in loaded else loaded
         if avg_state_dict is None:
             avg_state_dict = {k: v.clone().float() * weight for k, v in state_dict.items()}
         else:
@@ -91,7 +99,12 @@ def main():
         writer.writeheader()
         writer.writerow(metrics)
 
-    wandb.init(project="whisper-eval", name="aggregated-model")
+    wandb.login(key=os.getenv("WANDB_API_KEY"))
+    wandb.init(
+        project=os.getenv("WANDB_PROJECT"),
+        entity=os.getenv("WANDB_ENTITY"),
+        name="aggregated-model"
+    )
     wandb.log(metrics)
     wandb.finish()
 

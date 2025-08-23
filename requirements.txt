@@ -4,3 +4,8 @@ torchaudio
 pydub>=0.25.1
 numpy<2.0
 pandas
+evaluate
+sacrebleu
+wandb
+bitsandbytes
+accelerate

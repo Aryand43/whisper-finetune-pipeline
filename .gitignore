@@ -1,3 +1,7 @@
 *.flac
 *.wav
 *.pt
+checkpoints/*.pt
+whisper-aggregated/*.pt
+.env
+wandb/
