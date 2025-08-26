@@ -1,7 +1,11 @@
-*.flac
-*.wav
+__pycache__/
+*.pyc
 *.pt
-checkpoints/*.pt
-whisper-aggregated/*.pt
-.env
+*.bin
+*.npy
+*.tiff
+*.png
+*.wav
 wandb/
+.env
+whisper-aggregated/
