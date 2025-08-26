@@ -42,7 +42,10 @@ def average_checkpoints(model_paths, weights=None, save_path="aggregated_model.b
 
     for model_path, weight in zip(model_paths, weights):
         loaded = torch.load(model_path, map_location="cpu")
-        state_dict = loaded["state_dict"] if "state_dict" in loaded else loaded
+        state_dict = loaded["state_dict"]["model"] if "state_dict" in loaded and "model" in loaded["state_dict"] else loaded
+
+        for k, v in state_dict.items():
+            avg_state_dict[k] = v.clone().float() * weight
         if avg_state_dict is None:
             avg_state_dict = {k: v.clone().float() * weight for k, v in state_dict.items()}
         else:
