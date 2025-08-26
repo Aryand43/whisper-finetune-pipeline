@@ -1,4 +1,5 @@
 from model_aggregation import average_checkpoints
+from transformers import WhisperForConditionalGeneration
 
 model_paths = [
     "checkpoints/hearty-bee-7.pt",      
@@ -8,5 +9,6 @@ model_paths = [
 ]
 
 weights = [0.25, 0.25, 0.25, 0.25]
-
+model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-medium")
 average_checkpoints(model_paths, weights, save_path="aggregated_model.bin")
+model.save_pretrained("whisper-aggregated")
