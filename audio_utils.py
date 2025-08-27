@@ -1,48 +1,49 @@
 import os
+import torchaudio
+import torchaudio.transforms as T
+from datasets import load_dataset, Audio
 import hashlib
-import time
 import pandas as pd
-from pydub import AudioSegment
-from pydub.utils import which
 
-AudioSegment.converter = which("ffmpeg")
-AudioSegment.ffprobe = which("ffprobe")
+# Constants
+HF_DATASET = "mozilla-foundation/common_voice_11_0"
+LANG = "de"
+SPLIT = "train[:1%]"  # or "validation", etc.
+OUTPUT_DIR = "processed_train_subset"
+TSV_SAVE_PATH = "updated_file.tsv"
 
-def convert_flac_to_wav(input_path: str, output_dir: str) -> str:
-    start_time = time.time()
-    with open(input_path, 'rb') as f:
-        raw_bytes = f.read()
-    hash_id = hashlib.sha256(raw_bytes).hexdigest()
-    audio = AudioSegment.from_file(input_path, format="flac")
-    audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"{hash_id}.wav")
-    audio.export(output_path, format="wav")
-    latency = time.time() - start_time
-    print(f"{hash_id}.wav | {latency:.2f}s")
-    return f"{hash_id}.wav"  
+# Resampler to 16kHz mono
+resampler = T.Resample(orig_freq=48000, new_freq=16000)  # adjust if needed
 
-if __name__ == "__main__":
-    input_dir = "train_subset"
-    output_dir = "processed_train_subset"
-    tsv_path = os.path.join(input_dir, "train_subset.tsv")
-    new_tsv_path = "updated_file.tsv"
-    df = pd.read_csv(tsv_path, sep="\t")
-    updated_rows = []
+# Load dataset
+dataset = load_dataset(HF_DATASET, LANG, split=SPLIT)
+dataset = dataset.cast_column("audio", Audio(sampling_rate=16000))
 
-    for _, row in df.iterrows():
-        original_file = row["path"]
-        transcript = row["sentence"]
-        input_path = os.path.join(input_dir, original_file)
+# Processing loop
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+new_rows = []
 
-        if not os.path.exists(input_path):
-            print(f"Skipping missing file: {input_path}")
-            continue
+for example in dataset:
+    audio_array = example["audio"]["array"]
+    transcript = example["sentence"]
+    orig_sr = example["audio"]["sampling_rate"]
 
-        try:
-            new_filename = convert_flac_to_wav(input_path, output_dir)
-            updated_rows.append({"path": new_filename, "sentence": transcript})
-        except Exception as e:
-            print(f"Error converting {original_file}: {e}")
+    # Ensure mono 16kHz
+    if orig_sr != 16000:
+        audio_tensor = torchaudio.functional.resample(
+            torch.tensor(audio_array), orig_freq=orig_sr, new_freq=16000
+        )
+    else:
+        audio_tensor = torch.tensor(audio_array)
 
-    pd.DataFrame(updated_rows).to_csv(new_tsv_path, sep="\t", index=False)
+    # Save as WAV with hash-based name
+    hash_id = hashlib.sha256(audio_tensor.numpy().tobytes()).hexdigest()
+    wav_path = os.path.join(OUTPUT_DIR, f"{hash_id}.wav")
+    torchaudio.save(wav_path, audio_tensor.unsqueeze(0), 16000)
+
+    new_rows.append({"path": f"{hash_id}.wav", "sentence": transcript})
+    print(f"Saved: {wav_path}")
+
+# Save TSV
+pd.DataFrame(new_rows).to_csv(TSV_SAVE_PATH, sep="\t", index=False)
+print(f"\nSaved updated TSV to {TSV_SAVE_PATH}")
