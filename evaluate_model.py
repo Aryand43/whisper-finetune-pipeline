@@ -15,8 +15,7 @@ load_dotenv()
 def load_model_and_processor(model_dir: str):
     processor = WhisperProcessor.from_pretrained("openai/whisper-medium")
     config = AutoConfig.from_pretrained("openai/whisper-medium")
-    model = WhisperForConditionalGeneration(config)
-    model.load_state_dict(torch.load(os.path.join(model_dir, "aggregated_model.bin")))
+    model = WhisperForConditionalGeneration.from_pretrained(model_dir)
     model.to("cuda" if torch.cuda.is_available() else "cpu")
     return model, processor
 
