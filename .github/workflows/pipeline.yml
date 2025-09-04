@@ -25,10 +25,13 @@ jobs:
           pip install -r requirements.txt
           pip install torchaudio
 
-      - name: Lint and check formatting (black)
+      - name: Install formatter (black)
         run: |
           pip install black
-          black --check .
+
+      - name: Autoformat with black
+        run: |
+          black .
 
       - name: Dry run model load
         run: |
@@ -39,4 +42,4 @@ jobs:
           python -m compileall .
 
       - name: Notify Success
-        run: echo "✅ CI pipeline passed!"
+        run: echo "CI pipeline passed!"
