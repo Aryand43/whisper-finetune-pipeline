@@ -10,6 +10,7 @@ from datasets import load_dataset, config as datasets_config
 import os
 from dotenv import load_dotenv
 import torchaudio
+import random
 
 # Load env variables
 load_dotenv()
@@ -42,11 +43,16 @@ def load_model_and_processor(model_dir: str, precision: str = "float16"):
 def normalize_text(text: str) -> str:
     return re.sub(r'[^\w\s]', '', text.lower())
 
-def transcribe_dataset(model, processor, dataset):
+def transcribe_dataset(model, processor, dataset, save_probability=0.05):
     model.eval()
     predictions = []
+    references = []
+    saved_examples = []
+    total_samples = len(dataset)
+    print(f"Transcribing {total_samples} samples...")
+    print(f"💾 Saving examples with {save_probability*100:.1f}% probability...")
 
-    for sample in dataset:
+    for i, sample in enumerate(dataset):
         inputs = processor(
             sample["audio"]["array"],
             sampling_rate=sample["audio"]["sampling_rate"],
@@ -58,10 +64,69 @@ def transcribe_dataset(model, processor, dataset):
             generated_ids = model.generate(**inputs)
             transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             predictions.append(transcription)
+            references.append(sample["text"])
+            # Randomly decide whether to save this example
+            if random.random() < save_probability:
+                saved_examples.append({
+                    'index': i,
+                    'prediction': transcription,
+                    'reference': sample["text"]
+                })
+        # Progress indicator
+        if (i + 1) % 10 == 0:
+            print(f"Processed {i + 1}/{total_samples} samples (saved {len(saved_examples)} examples so far)")
 
-    return predictions
+    print(f"📊 Final: Processed {len(predictions)} samples, saved {len(saved_examples)} examples ({len(saved_examples)/len(predictions)*100:.1f}%)")
+    return predictions, references, saved_examples
+
+def save_examples_to_csv(saved_examples, output_path="evaluation_examples.csv"):
+    """
+    Save randomly selected evaluation examples to CSV with both normalized and non-normalized versions.
+    
+    Args:
+        saved_examples: List of dictionaries with 'index', 'prediction', 'reference' keys
+        output_path: Path to save the CSV file
+    """
+    if not saved_examples:
+        print("⚠️  No examples to save!")
+        return []
+    
+    examples = []
+    for i, ex in enumerate(saved_examples):
+        pred_raw = ex['prediction']
+        ref_raw = ex['reference']
+        pred_normalized = normalize_text(pred_raw)
+        ref_normalized = normalize_text(ref_raw)
+        
+        examples.append({
+            "sample_index": ex['index'],
+            "example_id": i + 1,
+            "reference_raw": ref_raw,
+            "prediction_raw": pred_raw,
+            "reference_normalized": ref_normalized,
+            "prediction_normalized": pred_normalized,
+        })
+    
+    # Save to CSV
+    with open(output_path, mode="w", newline="", encoding="utf-8") as file:
+        fieldnames = [
+            "sample_index",
+            "example_id", 
+            "reference_raw", 
+            "prediction_raw",
+            "reference_normalized", 
+            "prediction_normalized",
+        ]
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(examples)
+    
+    print(f"📄 Saved {len(examples)} examples to: {output_path}")
+    
+    return examples
 
 def evaluate_metrics(predictions, references):
+    """Compute WER and BLEU metrics on normalized text."""
     wer_metric = evaluate.load("wer")
     wer = wer_metric.compute(predictions=predictions, references=references)
     bleu = sacrebleu.corpus_bleu(predictions, [references]).score
@@ -81,34 +146,81 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_dir", type=str, required=True, help="Directory of HF-style model folder")
     parser.add_argument("--dataset_name", type=str, required=True)
+    parser.add_argument("--dataset_config", type=str, help="Dataset configuration (e.g., 'gsw' for Swiss German)")
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--precision", type=str, default="fp32", choices=["fp32", "float16", "int8"])
+    parser.add_argument("--examples_csv", type=str, default="evaluation_examples.csv", help="Path to save example CSV")
     args = parser.parse_args()
 
+    print(f"🚀 Loading model from: {args.model_dir}")
     model, processor = load_model_and_processor(args.model_dir, precision=args.precision)
 
-    dataset = load_dataset(args.dataset_name, split=args.split)
+    print(f"📚 Loading dataset: {args.dataset_name}")
+    if args.dataset_config:
+        dataset = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
+    else:
+        dataset = load_dataset(args.dataset_name, split=args.split)
+    
+    print(f"Dataset size: {len(dataset)} samples")
+    
+    
     dataset = dataset.map(force_decode_with_torchaudio)
     dataset = dataset.with_format("python")
 
-    predictions = transcribe_dataset(model, processor, dataset)
-    references = [normalize_text(sample["text"]) for sample in dataset]
-    predictions = [normalize_text(p) for p in predictions]
-    metrics = evaluate_metrics(predictions, references)
+    print(f"🎯 Starting transcription...")
+    predictions, references, saved_examples = transcribe_dataset(model, processor, dataset, save_probability=0.05)
+    # Save examples to CSV (before normalization)
+    print(f"💾 Saving examples...")
+    save_examples_to_csv(saved_examples, args.examples_csv)
+    
+    # Normalize for metrics computation
+    print(f"📊 Computing metrics...")
+    references_normalized = [normalize_text(ref) for ref in references]
+    predictions_normalized = [normalize_text(pred) for pred in predictions]
+    metrics = evaluate_metrics(predictions_normalized, references_normalized)
+    
+    print(f"\n🎯 Results:")
+    print(f"  WER: {metrics['wer']:.4f}")
+    print(f"  BLEU: {metrics['bleu']:.2f}")
 
-    with open("results.csv", mode="w", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=["wer", "bleu"])
+    # Save metrics to CSV
+    metrics_file = "evaluation_metrics.csv"
+    with open(metrics_file, mode="w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["wer", "bleu", "model_dir", "dataset", "samples"])
         writer.writeheader()
-        writer.writerow(metrics)
+        writer.writerow({
+            "wer": metrics["wer"],
+            "bleu": metrics["bleu"], 
+            "model_dir": args.model_dir,
+            "dataset": f"{args.dataset_name}:{args.dataset_config}" if args.dataset_config else args.dataset_name,
+            "samples": len(predictions)
+        })
+    print(f"📊 Saved metrics to: {metrics_file}")
 
-    wandb.login(key=os.getenv("WANDB_API_KEY"))
-    wandb.init(
-        project=os.getenv("WANDB_PROJECT"),
-        entity=os.getenv("WANDB_ENTITY"),
-        name=f"aggregated-model-{args.precision}"
-    )
-    wandb.log(metrics)
-    wandb.finish()
+    # Log to wandb if configured
+    if os.getenv("WANDB_API_KEY"):
+        print(f"📡 Logging to wandb...")
+        wandb.login(key=os.getenv("WANDB_API_KEY"))
+        wandb.init(
+            project=os.getenv("WANDB_PROJECT"),
+            entity=os.getenv("WANDB_ENTITY"),
+            name=f"eval-{args.model_dir.replace('/', '-')}-{args.precision}"
+        )
+        wandb.log({
+            **metrics,
+            "model_dir": args.model_dir,
+            "dataset": args.dataset_name,
+            "samples": len(predictions),
+            "precision": args.precision
+        })
+        wandb.finish()
+        print(f"✅ Logged to wandb")
+    else:
+        print(f"⚠️  Skipping wandb logging (no API key found)")
+    
+    print(f"\n✅ Evaluation complete!")
+    print(f"   📄 Examples: {args.examples_csv}")
+    print(f"   📊 Metrics: {metrics_file}")
 
 if __name__ == "__main__":
     main()
