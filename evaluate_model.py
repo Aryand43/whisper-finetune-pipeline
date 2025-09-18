@@ -31,8 +31,7 @@ def load_model_and_processor(model_dir: str, precision: str = "fp32"):
     else:
         model = WhisperForConditionalGeneration.from_pretrained(model_dir)
 
-    model.to("cuda" if torch.cuda.is_available() else "cpu")
-    return model, processor
+    return model, processor  # Remove the manual `.to(...)` line
 
 def normalize_text(text: str) -> str:
     return re.sub(r'[^\w\s]', '', text.lower())
@@ -40,17 +39,20 @@ def normalize_text(text: str) -> str:
 def transcribe_dataset(model, processor, dataset):
     model.eval()
     predictions = []
+
     for sample in dataset:
         inputs = processor(
             sample["audio"]["array"],
             sampling_rate=sample["audio"]["sampling_rate"],
             return_tensors="pt"
         )
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
         with torch.no_grad():
-            logits = model(**inputs).logits
-        predicted_ids = torch.argmax(logits, dim=-1)
-        transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-        predictions.append(transcription)
+            generated_ids = model.generate(**inputs)
+            transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            predictions.append(transcription)
+
     return predictions
 
 def evaluate_metrics(predictions, references):
@@ -59,14 +61,15 @@ def evaluate_metrics(predictions, references):
     bleu = sacrebleu.corpus_bleu(predictions, [references]).score
     return {"wer": wer, "bleu": bleu}
 
+import torchaudio
+
 def force_decode_with_torchaudio(example):
-    audio_path = example["audio"]["path"]
-    waveform, sample_rate = torchaudio.load(audio_path)
-    if sample_rate != 16000:
-        waveform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)(waveform)
-    example["audio"]["array"] = waveform.squeeze().numpy()
-    example["audio"]["sampling_rate"] = 16000
-    return example
+    audio_array, sampling_rate = example["audio"]["array"], example["audio"]["sampling_rate"]
+    return {
+        "audio_array": audio_array,
+        "sampling_rate": sampling_rate,
+        "transcription": example["text"],
+    }
 
 def main():
     parser = argparse.ArgumentParser()

@@ -65,7 +65,7 @@ def main():
     # Save HF wrapper
     base_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-medium")
     avg_weights = torch.load(save_path)
-    base_model.load_state_dict(avg_weights, strict=False)  # avoid crash if some keys mismatch
+    base_model.load_state_dict(avg_weights)  # avoid crash if some keys mismatch
     base_model.save_pretrained(args.save_dir)
 
     print(f"HF model saved to: {args.save_dir}")
