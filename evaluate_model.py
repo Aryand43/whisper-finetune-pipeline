@@ -15,8 +15,14 @@ import torchaudio
 load_dotenv()
 datasets_config.HF_DATASETS_AUDIO_BACKEND = "torchaudio"
 
-def load_model_and_processor(model_dir: str, precision: str = "fp32"):
-    processor = WhisperProcessor.from_pretrained("openai/whisper-medium")
+def load_model_and_processor(model_dir: str, precision: str = "float16"):
+    # Try to load processor from the model directory first, fallback to base model
+    try:
+        processor = WhisperProcessor.from_pretrained(model_dir)
+        print(f"Loaded processor from model directory: {model_dir}")
+    except Exception as e:
+        print(f"Could not load processor from {model_dir}, using whisper-large-v3-turbo as fallback")
+        processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3-turbo")
 
     if precision == "float16":
         model = WhisperForConditionalGeneration.from_pretrained(

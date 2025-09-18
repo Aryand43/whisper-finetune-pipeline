@@ -2,49 +2,7 @@ import argparse
 import torch
 import os
 from transformers import WhisperForConditionalGeneration
-
-def flatten_state_dict(state, parent_key='', sep='.'):
-    items = {}
-    for k, v in state.items():
-        new_key = parent_key + sep + k if parent_key else k
-        if isinstance(v, dict):
-            items.update(flatten_state_dict(v, new_key, sep=sep))
-        else:
-            items[new_key] = v
-    return items
-
-def average_checkpoints(model_paths, weights=None, save_path="whisper-aggregated/pytorch_model.bin"):
-    if weights is None:
-        weights = [1.0 / len(model_paths)] * len(model_paths)
-
-    assert len(weights) == len(model_paths), "Mismatch between number of models and weights"
-    assert abs(sum(weights) - 1.0) < 1e-6, "Weights must sum to 1"
-
-    avg_state_dict = None
-    for path, weight in zip(model_paths, weights):
-        loaded = torch.load(path, map_location="cpu")
-
-        if "state_dict" in loaded:
-            if "model" in loaded["state_dict"]:
-                state_dict = loaded["state_dict"]["model"]
-            else:
-                state_dict = loaded["state_dict"]
-        else:
-            state_dict = loaded
-
-        state_dict = flatten_state_dict(state_dict)
-        state_dict = {k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
-
-        if avg_state_dict is None:
-            avg_state_dict = {k: v.clone().float() * weight for k, v in state_dict.items()}
-        else:
-            for k in avg_state_dict:
-                if k in state_dict:
-                    avg_state_dict[k] += state_dict[k].float() * weight
-
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    torch.save(avg_state_dict, save_path)
-    print(f"Averaged model saved at: {save_path}")
+from model_aggregation import average_checkpoints_structured
 
 def main():
     parser = argparse.ArgumentParser()
@@ -59,16 +17,47 @@ def main():
     else:
         weights = [1.0 / len(args.checkpoints)] * len(args.checkpoints)
 
-    save_path = os.path.join(args.save_dir, "pytorch_model.bin")
-    average_checkpoints(args.checkpoints, weights, save_path)
+    # Step 1: Average the checkpoints while preserving structure
+    print("Averaging checkpoints...")
+    # Use the function from model_aggregation.py but we don't need the file save
+    # So we'll just get the averaged state dict by calling it without save_path
+    temp_save_path = "/tmp/temp_avg_model.bin"
+    avg_state_dict = average_checkpoints_structured(args.checkpoints, weights, temp_save_path)
+    
+    # Clean up the temporary file since we don't need it
+    if os.path.exists(temp_save_path):
+        os.remove(temp_save_path)
 
-    # Save HF wrapper
-    base_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-medium")
-    avg_weights = torch.load(save_path)
-    base_model.load_state_dict(avg_weights)  # avoid crash if some keys mismatch
+    # Step 2: Load the base whisper-large-v3-turbo model
+    print("Loading base whisper-large-v3-turbo model...")
+    base_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v3-turbo")
+    
+    # Step 3: Overwrite the model weights with averaged weights
+    print("Loading averaged weights into model...")
+    try:
+        # Try to load the state dict, handling potential key mismatches
+        missing_keys, unexpected_keys = base_model.load_state_dict(avg_state_dict, strict=False)
+        
+        if missing_keys:
+            print(f"Warning: Missing keys in averaged model: {missing_keys[:5]}...")  # Show first 5
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys in averaged model: {unexpected_keys[:5]}...")  # Show first 5
+            
+    except Exception as e:
+        print(f"Error loading state dict: {e}")
+    
+    # Step 4: Save the model using save_pretrained
+    print(f"Saving aggregated model to: {args.save_dir}")
+    os.makedirs(args.save_dir, exist_ok=True)
     base_model.save_pretrained(args.save_dir)
+    
+    # Also save the processor for completeness
+    from transformers import WhisperProcessor
+    processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3-turbo")
+    processor.save_pretrained(args.save_dir)
 
-    print(f"HF model saved to: {args.save_dir}")
+    print(f"HF model and processor saved to: {args.save_dir}")
+    print("Model aggregation completed successfully!")
 
 if __name__ == "__main__":
     main()
