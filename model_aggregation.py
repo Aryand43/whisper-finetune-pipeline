@@ -109,65 +109,104 @@ def average_checkpoints_structured(model_paths, weights=None, save_path="aggrega
 
 if __name__ == "__main__":
     print("Testing structure-preserving vs flattening approach...")
+    print("Based on real whisper-large-v3-turbo structure analysis...\n")
     
-    # Create two mock nested state dictionaries
+    # Create two mock state dictionaries that match the REAL whisper structure
+    # Keys are already "flattened" like in the actual model: model.encoder.conv1.weight
     state_dict1 = {
-        "encoder": {
-            "layer1": {
-                "weight": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
-                "bias": torch.tensor([0.5, 1.5])
-            },
-            "layer2": {
-                "weight": torch.tensor([[5.0, 6.0]]),
-                "bias": torch.tensor([2.5])
-            }
-        },
-        "decoder": {
-            "output": {
-                "weight": torch.tensor([[7.0, 8.0], [9.0, 10.0]])
-            }
-        }
+        "model.encoder.conv1.weight": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        "model.encoder.conv1.bias": torch.tensor([0.5, 1.5]),
+        "model.encoder.layer_norm.weight": torch.tensor([1.0, 1.0]),
+        "model.encoder.layer_norm.bias": torch.tensor([0.1, 0.2]),
+        "model.decoder.embed_tokens.weight": torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]),
+        "model.decoder.layer_norm.weight": torch.tensor([2.0, 2.0]),
+        "proj_out.weight": torch.tensor([[7.0, 8.0], [9.0, 10.0]])
     }
     
     state_dict2 = {
-        "encoder": {
-            "layer1": {
-                "weight": torch.tensor([[2.0, 3.0], [4.0, 5.0]]),
-                "bias": torch.tensor([1.0, 2.0])
-            },
-            "layer2": {
-                "weight": torch.tensor([[6.0, 7.0]]),
-                "bias": torch.tensor([3.0])
-            }
-        },
-        "decoder": {
-            "output": {
-                "weight": torch.tensor([[8.0, 9.0], [10.0, 11.0]])
-            }
-        }
+        "model.encoder.conv1.weight": torch.tensor([[2.0, 3.0], [4.0, 5.0]]),
+        "model.encoder.conv1.bias": torch.tensor([1.0, 2.0]),
+        "model.encoder.layer_norm.weight": torch.tensor([1.5, 1.5]),
+        "model.encoder.layer_norm.bias": torch.tensor([0.2, 0.3]),
+        "model.decoder.embed_tokens.weight": torch.tensor([[0.2, 0.3, 0.4], [0.5, 0.6, 0.7]]),
+        "model.decoder.layer_norm.weight": torch.tensor([2.5, 2.5]),
+        "proj_out.weight": torch.tensor([[8.0, 9.0], [10.0, 11.0]])
     }
     
-    print("\n=== Original State Dict 1 ===")
-    print(state_dict1)
+    print("=== Mock Checkpoint 1 (simulates training checkpoint) ===")
+    checkpoint1 = {
+        "state_dict": {
+            "model": state_dict1
+        },
+        "epoch": 5,
+        "lr": 1e-5
+    }
+    print(f"Checkpoint keys: {list(checkpoint1.keys())}")
+    print(f"Model state dict keys (first 3): {list(state_dict1.keys())[:3]}")
     
-    print("\n=== Original State Dict 2 ===")
-    print(state_dict2)
-
+    print("\n=== Mock Checkpoint 2 ===")
+    checkpoint2 = {
+        "state_dict": {
+            "model": state_dict2
+        },
+        "epoch": 10,
+        "lr": 5e-6
+    }
+    print(f"Checkpoint keys: {list(checkpoint2.keys())}")
+    print(f"Model state dict keys (first 3): {list(state_dict2.keys())[:3]}")
     
-    # Test structure-preserving averaging
-    print("\n=== Structure-Preserving Average (weights: [0.6, 0.4]) ===")
-    averaged_structured = average_nested_state_dict([state_dict1, state_dict2], [0.75, 0.25])
-    print(averaged_structured)
+    # Create temporary checkpoint files to test the full pipeline
+    print("\n=== Testing Full Checkpoint Loading Pipeline ===")
+    import tempfile
+    import os
     
-    # Verify the math manually for one tensor
-    expected_weight = state_dict1["encoder"]["layer1"]["weight"] * 0.75 + state_dict2["encoder"]["layer1"]["weight"] * 0.25
-    actual_weight = averaged_structured["encoder"]["layer1"]["weight"]
+    temp_dir = tempfile.mkdtemp()
+    checkpoint1_path = os.path.join(temp_dir, "checkpoint1.pt")
+    checkpoint2_path = os.path.join(temp_dir, "checkpoint2.pt")
     
-    print(f"\n=== Manual Verification ===")
-    print(f"Expected encoder.layer1.weight: {expected_weight}")
-    print(f"Actual encoder.layer1.weight: {actual_weight}")
-    print(f"Match: {torch.allclose(expected_weight, actual_weight)}")
+    torch.save(checkpoint1, checkpoint1_path)
+    torch.save(checkpoint2, checkpoint2_path)
     
-    print(f"\n=== Structure Comparison ===")
-    print(f"Original has nested structure: {isinstance(state_dict1['encoder'], dict)}")
-    print(f"Averaged has nested structure: {isinstance(averaged_structured['encoder'], dict)}")
+    print(f"Created temporary checkpoints:")
+    print(f"  - {checkpoint1_path}")
+    print(f"  - {checkpoint2_path}")
+    
+    # Test our extraction and aggregation
+    try:
+        print("\n=== Testing Checkpoint Aggregation ===")
+        aggregated_result = average_checkpoints_structured(
+            [checkpoint1_path, checkpoint2_path], 
+            [0.7, 0.3],
+            os.path.join(temp_dir, "aggregated.pt")
+        )
+        
+        print("✅ Aggregation successful!")
+        print(f"Aggregated result keys (first 5): {list(aggregated_result.keys())[:5]}")
+        
+        # Verify the math for one tensor
+        expected_weight = state_dict1["model.encoder.conv1.weight"] * 0.7 + state_dict2["model.encoder.conv1.weight"] * 0.3
+        actual_weight = aggregated_result["model.encoder.conv1.weight"]
+        
+        print(f"\n=== Manual Verification ===")
+        print(f"Expected model.encoder.conv1.weight: {expected_weight}")
+        print(f"Actual model.encoder.conv1.weight: {actual_weight}")
+        print(f"Match: {torch.allclose(expected_weight, actual_weight)}")
+        
+        # Test that this would work with the real model loading
+        print(f"\n=== Compatibility Test ===")
+        print(f"Result has whisper-like keys: {'model.encoder.conv1.weight' in aggregated_result}")
+        print(f"Result has proj_out: {'proj_out.weight' in aggregated_result}")
+        print(f"All keys are strings: {all(isinstance(k, str) for k in aggregated_result.keys())}")
+        print(f"All values are tensors: {all(isinstance(v, torch.Tensor) for v in aggregated_result.values())}")
+        
+    finally:
+        # Cleanup
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        print(f"\n🧹 Cleaned up temporary files")
+    
+    print(f"\n=== Key Insights ===")
+    print("1. Real Whisper models already have 'flattened' keys like 'model.encoder.conv1.weight'")
+    print("2. Training checkpoints wrap this in: checkpoint['state_dict']['model']")
+    print("3. Our aggregation preserves the exact key structure needed for model.load_state_dict()")
+    print("4. No additional flattening/unflattening needed - keys match original model!")
