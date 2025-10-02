@@ -1,5 +1,5 @@
 import torch
-from transformers import WhisperProcessor, WhisperForConditionalGeneration, AutoConfig
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 import re
 import evaluate
 import sacrebleu
@@ -9,72 +9,81 @@ import wandb
 from datasets import load_dataset, config as datasets_config
 import os
 from dotenv import load_dotenv
-import torchaudio
 import random
 
 # Load env variables
 load_dotenv()
 datasets_config.HF_DATASETS_AUDIO_BACKEND = "torchaudio"
 
-def load_model_and_processor(model_dir: str, precision: str = "float16"):
-    # Try to load processor from the model directory first, fallback to base model
+def load_model_and_pipeline(model_dir: str, precision: str = "float16"):
+    """Load model and create pipeline with chunking support."""
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    torch_dtype = torch.float16 if torch.cuda.is_available() and precision == "float16" else torch.float32
+    
+    # Try to load from the model directory first, fallback to base model
     try:
-        processor = WhisperProcessor.from_pretrained(model_dir)
-        print(f"Loaded processor from model directory: {model_dir}")
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_dir, torch_dtype=torch_dtype, low_cpu_mem_usage=True
+        )
+        processor = AutoProcessor.from_pretrained(model_dir)
+        print(f"Loaded model and processor from model directory: {model_dir}")
     except Exception as e:
-        print(f"Could not load processor from {model_dir}, using whisper-large-v3-turbo as fallback")
-        processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3-turbo")
+        print(f"Could not load model from {model_dir}, using whisper-large-v3-turbo as fallback")
         model_dir = "openai/whisper-large-v3-turbo"
-
-    if precision == "float16":
-        model = WhisperForConditionalGeneration.from_pretrained(
-            model_dir, torch_dtype=torch.float16, device_map="auto"
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_dir, torch_dtype=torch_dtype, low_cpu_mem_usage=True
         )
-    elif precision == "int8":
-        from transformers import BitsAndBytesConfig
-        quant_config = BitsAndBytesConfig(load_in_8bit=True)
-        model = WhisperForConditionalGeneration.from_pretrained(
-            model_dir, quantization_config=quant_config, device_map="auto"
-        )
-    else:
-        model = WhisperForConditionalGeneration.from_pretrained(model_dir)
+        processor = AutoProcessor.from_pretrained(model_dir)
 
-    return model, processor  # Remove the manual `.to(...)` line
+    model.to(device)
+
+    # Create pipeline with chunking support
+    pipe = pipeline(
+        "automatic-speech-recognition",
+        model=model,
+        tokenizer=processor.tokenizer,
+        feature_extractor=processor.feature_extractor,
+        chunk_length_s=30,
+        batch_size=16,  # batch size for inference - set based on your device
+        torch_dtype=torch_dtype,
+        device=device,
+    )
+
+    return pipe, processor
 
 def normalize_text(text: str) -> str:
     return re.sub(r'[^\w\s]', '', text.lower())
 
-def transcribe_dataset(model, processor, dataset, save_probability=1.00):
-    print(f"Using device: {model.device}")
-    model.eval()
+def transcribe_dataset(pipe, dataset, save_probability):
+    """Transcribe dataset using pipeline with 30-second chunking support."""
     predictions = []
     references = []
     saved_examples = []
     total_samples = len(dataset)
-    print(f"Transcribing {total_samples} samples...")
+    print(f"Transcribing {total_samples} samples with 30-second chunking...")
     print(f"💾 Saving examples with {save_probability*100:.1f}% probability...")
 
     for i, sample in enumerate(dataset):
-        inputs = processor(
-            sample["audio"]["array"],
-            sampling_rate=sample["audio"]["sampling_rate"],
-            return_tensors="pt"
-        )
-        inputs = {k: v.to(model.device, dtype=torch.float16) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            generated_ids = model.generate(**inputs)
-            transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            predictions.append(transcription)
-            references.append(sample["sentence"] if "sentence" in sample else sample["text"])
-            # Randomly decide whether to save this example
-            if random.random() < save_probability:
-                saved_examples.append({
-                    'index': i,
-                    'prediction': transcription,
-                    'reference': sample["sentence"] if "sentence" in sample else sample["text"],
-                })
+        # Use the pipeline for transcription with automatic chunking
+        audio_data = {
+            "array": sample["audio"]["array"],
+            "sampling_rate": sample["audio"]["sampling_rate"]
+        }
+        
+        result = pipe(audio_data)
+        transcription = result["text"]
+        
+        predictions.append(transcription)
+        references.append(sample["sentence"] if "sentence" in sample else sample["text"])
+        
+        # Randomly decide whether to save this example
+        if random.random() < save_probability:
+            saved_examples.append({
+                'index': i,
+                'prediction': transcription,
+                'reference': sample["sentence"] if "sentence" in sample else sample["text"],
+            })
+        
         # Progress indicator
         if (i + 1) % 10 == 0:
             print(f"Processed {i + 1}/{total_samples} samples (saved {len(saved_examples)} examples so far)")
@@ -131,12 +140,8 @@ def save_examples_to_csv(saved_examples, output_path="evaluation_examples.csv"):
 def evaluate_metrics(predictions, references):
     """Compute WER and BLEU metrics on normalized text."""
     wer_metric = evaluate.load("wer")
-    print(f"{predictions=}")
-    print(f"{references=}")
     wer = wer_metric.compute(predictions=predictions, references=references)
-    print(f"{wer=}")
     bleu = sacrebleu.corpus_bleu(predictions, [references]).score
-    print(f"{bleu=}")
     return {"wer": wer, "bleu": bleu}
 
 import torchaudio
@@ -160,7 +165,7 @@ def main():
     args = parser.parse_args()
 
     print(f"🚀 Loading model from: {args.model_dir}")
-    model, processor = load_model_and_processor(args.model_dir, precision=args.precision)
+    pipe, processor = load_model_and_pipeline(args.model_dir, precision=args.precision)
 
     print(f"📚 Loading dataset: {args.dataset_name}")
     if args.dataset_config:
@@ -175,7 +180,7 @@ def main():
     dataset = dataset.with_format("python")
 
     print(f"🎯 Starting transcription...")
-    predictions, references, saved_examples = transcribe_dataset(model, processor, dataset, save_probability=0.05)
+    predictions, references, saved_examples = transcribe_dataset(pipe, dataset, save_probability=1)
     # Save examples to CSV (before normalization)
     print(f"💾 Saving examples...")
     save_examples_to_csv(saved_examples, args.examples_csv)
