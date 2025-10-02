@@ -18,12 +18,14 @@ datasets_config.HF_DATASETS_AUDIO_BACKEND = "torchaudio"
 
 def load_model_and_processor(model_dir: str, precision: str = "float16"):
     # Try to load processor from the model directory first, fallback to base model
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
     try:
         processor = WhisperProcessor.from_pretrained(model_dir)
         print(f"Loaded processor from model directory: {model_dir}")
     except Exception as e:
         print(f"Could not load processor from {model_dir}, using whisper-large-v3-turbo as fallback")
         processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3-turbo")
+        model_dir = "openai/whisper-large-v3-turbo"
 
     if precision == "float16":
         model = WhisperForConditionalGeneration.from_pretrained(
@@ -43,7 +45,8 @@ def load_model_and_processor(model_dir: str, precision: str = "float16"):
 def normalize_text(text: str) -> str:
     return re.sub(r'[^\w\s]', '', text.lower())
 
-def transcribe_dataset(model, processor, dataset, save_probability=0.05):
+def transcribe_dataset(model, processor, dataset, save_probability=1.00):
+    print(f"Using device: {model.device}")
     model.eval()
     predictions = []
     references = []
@@ -58,19 +61,19 @@ def transcribe_dataset(model, processor, dataset, save_probability=0.05):
             sampling_rate=sample["audio"]["sampling_rate"],
             return_tensors="pt"
         )
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        inputs = {k: v.to(model.device, dtype=torch.float16) for k, v in inputs.items()}
 
         with torch.no_grad():
             generated_ids = model.generate(**inputs)
             transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             predictions.append(transcription)
-            references.append(sample["text"])
+            references.append(sample["sentence"] if "sentence" in sample else sample["text"])
             # Randomly decide whether to save this example
             if random.random() < save_probability:
                 saved_examples.append({
                     'index': i,
                     'prediction': transcription,
-                    'reference': sample["text"]
+                    'reference': sample["sentence"] if "sentence" in sample else sample["text"],
                 })
         # Progress indicator
         if (i + 1) % 10 == 0:
@@ -128,8 +131,12 @@ def save_examples_to_csv(saved_examples, output_path="evaluation_examples.csv"):
 def evaluate_metrics(predictions, references):
     """Compute WER and BLEU metrics on normalized text."""
     wer_metric = evaluate.load("wer")
+    print(f"{predictions=}")
+    print(f"{references=}")
     wer = wer_metric.compute(predictions=predictions, references=references)
+    print(f"{wer=}")
     bleu = sacrebleu.corpus_bleu(predictions, [references]).score
+    print(f"{bleu=}")
     return {"wer": wer, "bleu": bleu}
 
 import torchaudio
@@ -139,7 +146,7 @@ def force_decode_with_torchaudio(example):
     return {
         "audio_array": audio_array,
         "sampling_rate": sampling_rate,
-        "transcription": example["text"],
+        "transcription": example["sentence"] if "sentence" in example else example["text"],
     }
 
 def main():
@@ -148,7 +155,7 @@ def main():
     parser.add_argument("--dataset_name", type=str, required=True)
     parser.add_argument("--dataset_config", type=str, help="Dataset configuration (e.g., 'gsw' for Swiss German)")
     parser.add_argument("--split", type=str, default="test")
-    parser.add_argument("--precision", type=str, default="fp32", choices=["fp32", "float16", "int8"])
+    parser.add_argument("--precision", type=str, default="float16", choices=["fp32", "float16", "int8"])
     parser.add_argument("--examples_csv", type=str, default="evaluation_examples.csv", help="Path to save example CSV")
     args = parser.parse_args()
 
