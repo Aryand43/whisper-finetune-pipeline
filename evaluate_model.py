@@ -29,6 +29,7 @@ def load_model_and_pipeline(model_dir: str, precision: str = "float16"):
         print(f"Loaded model and processor from model directory: {model_dir}")
     except Exception as e:
         print(f"Could not load model from {model_dir}, using whisper-large-v3-turbo as fallback")
+        print(f"!!!WARNING: {e}. USING FALLBACK MODEL.")
         model_dir = "openai/whisper-large-v3-turbo"
         model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_dir, torch_dtype=torch_dtype, low_cpu_mem_usage=True
