@@ -9,8 +9,5 @@ sacrebleu
 wandb
 bitsandbytes
 accelerate
-evaluate
-sacrebleu
-wandb
 dotenv
-accelerate
+tochcodec
