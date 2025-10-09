@@ -28,14 +28,7 @@ def load_model_and_pipeline(model_dir: str, precision: str = "float16"):
         processor = AutoProcessor.from_pretrained(model_dir)
         print(f"Loaded model and processor from model directory: {model_dir}")
     except Exception as e:
-        print(f"Could not load model from {model_dir}, using whisper-large-v3-turbo as fallback")
-        print(f"!!!WARNING: {e}. USING FALLBACK MODEL.")
-        model_dir = "openai/whisper-large-v3-turbo"
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_dir, torch_dtype=torch_dtype, low_cpu_mem_usage=True
-        )
-        processor = AutoProcessor.from_pretrained(model_dir)
-
+        raise RuntimeError(f"❌ Failed to load model from {model_dir}. Check if the directory exists and has the correct files.\nError: {e}")
     model.to(device)
 
     # Create pipeline with chunking support
@@ -163,6 +156,7 @@ def main():
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--precision", type=str, default="float16", choices=["fp32", "float16", "int8"])
     parser.add_argument("--examples_csv", type=str, default="evaluation_examples.csv", help="Path to save example CSV")
+    parser.add_argument("--metrics_csv", type=str, default="evaluation_metrics.csv", help="Path to save metrics CSV")
     args = parser.parse_args()
 
     print(f"🚀 Loading model from: {args.model_dir}")
@@ -197,7 +191,7 @@ def main():
     print(f"  BLEU: {metrics['bleu']:.2f}")
 
     # Save metrics to CSV
-    metrics_file = "evaluation_metrics.csv"
+    metrics_file = args.metrics_csv
     with open(metrics_file, mode="w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=["wer", "bleu", "model_dir", "dataset", "samples"])
         writer.writeheader()
