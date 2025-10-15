@@ -30,6 +30,7 @@ def load_model_and_pipeline(model_dir: str, precision: str = "float16"):
     except Exception as e:
         raise RuntimeError(f"❌ Failed to load model from {model_dir}. Check if the directory exists and has the correct files.\nError: {e}")
     model.to(device)
+    print(f"Model param hash: {sum(p.sum().item() for p in model.parameters())}")
 
     # Create pipeline with chunking support
     pipe = pipeline(
