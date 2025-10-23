@@ -10,10 +10,15 @@ from datasets import load_dataset, config as datasets_config
 import os
 from dotenv import load_dotenv
 import random
+import hashlib
 
 # Load env variables
 load_dotenv()
 datasets_config.HF_DATASETS_AUDIO_BACKEND = "torchaudio"
+
+def hash_model_weights(model):
+    total_bytes = b''.join([p.detach().cpu().numpy().tobytes() for p in model.parameters()])
+    return hashlib.sha256(total_bytes).hexdigest()
 
 def load_model_and_pipeline(model_dir: str, precision: str = "float16"):
     """Load model and create pipeline with chunking support."""
@@ -30,7 +35,7 @@ def load_model_and_pipeline(model_dir: str, precision: str = "float16"):
     except Exception as e:
         raise RuntimeError(f"❌ Failed to load model from {model_dir}. Check if the directory exists and has the correct files.\nError: {e}")
     model.to(device)
-    print(f"Model param hash: {sum(p.sum().item() for p in model.parameters())}")
+    print(f"Model weight SHA256 hash: {hash_model_weights(model)}")
 
     # Create pipeline with chunking support
     pipe = pipeline(

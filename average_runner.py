@@ -3,6 +3,11 @@ import torch
 import os
 from transformers import WhisperForConditionalGeneration
 from model_aggregation import average_checkpoints_structured
+import hashlib
+
+def hash_state_dict(state_dict):
+    total_bytes = b''.join([v.cpu().numpy().tobytes() for v in state_dict.values() if isinstance(v, torch.Tensor)])
+    return hashlib.sha256(total_bytes).hexdigest()
 
 def main():
     parser = argparse.ArgumentParser()
@@ -24,6 +29,8 @@ def main():
     temp_save_path = "/tmp/temp_avg_model.bin"
     avg_state_dict = average_checkpoints_structured(args.checkpoints, weights, temp_save_path)
     
+    print(f"Hash of aggregated state dict: {hash_state_dict(avg_state_dict)}")
+
     # Clean up the temporary file since we don't need it
     if os.path.exists(temp_save_path):
         os.remove(temp_save_path)
