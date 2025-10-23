@@ -17,9 +17,12 @@ load_dotenv()
 datasets_config.HF_DATASETS_AUDIO_BACKEND = "torchaudio"
 
 def robust_hash_state_dict(state_dict):
+    if "model_state_dict" in state_dict:
+        state_dict = state_dict["model_state_dict"]
+
     def extract_tensor_bytes(d):
         tensor_bytes = []
-        for key in sorted(d.keys()):  # ensures order doesn't affect the hash
+        for key in sorted(d.keys()):
             v = d[key]
             if isinstance(v, dict):
                 tensor_bytes.extend(extract_tensor_bytes(v))
