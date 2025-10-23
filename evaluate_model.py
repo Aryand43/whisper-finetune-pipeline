@@ -16,9 +16,19 @@ import hashlib
 load_dotenv()
 datasets_config.HF_DATASETS_AUDIO_BACKEND = "torchaudio"
 
-def hash_model_weights(model):
-    total_bytes = b''.join([p.detach().cpu().numpy().tobytes() for p in model.parameters()])
-    return hashlib.sha256(total_bytes).hexdigest()
+def robust_hash_state_dict(state_dict):
+    def extract_tensor_bytes(d):
+        tensor_bytes = []
+        for key in sorted(d.keys()):  # ensures order doesn't affect the hash
+            v = d[key]
+            if isinstance(v, dict):
+                tensor_bytes.extend(extract_tensor_bytes(v))
+            elif isinstance(v, torch.Tensor):
+                tensor_bytes.append(v.detach().cpu().numpy().tobytes())
+        return tensor_bytes
+
+    all_bytes = b''.join(extract_tensor_bytes(state_dict))
+    return hashlib.sha256(all_bytes).hexdigest()
 
 def load_model_and_pipeline(model_dir: str, precision: str = "float16"):
     """Load model and create pipeline with chunking support."""
@@ -33,9 +43,9 @@ def load_model_and_pipeline(model_dir: str, precision: str = "float16"):
         processor = AutoProcessor.from_pretrained(model_dir)
         print(f"Loaded model and processor from model directory: {model_dir}")
     except Exception as e:
-        raise RuntimeError(f"❌ Failed to load model from {model_dir}. Check if the directory exists and has the correct files.\nError: {e}")
+        raise RuntimeError(f"Failed to load model from {model_dir}. Check if the directory exists and has the correct files.\nError: {e}")
     model.to(device)
-    print(f"Model weight SHA256 hash: {hash_model_weights(model)}")
+    print(f"Model weight SHA256 hash: {robust_hash_state_dict(model.state_dict())}")
 
     # Create pipeline with chunking support
     pipe = pipeline(
@@ -61,7 +71,7 @@ def transcribe_dataset(pipe, dataset, save_probability):
     saved_examples = []
     total_samples = len(dataset)
     print(f"Transcribing {total_samples} samples with 30-second chunking...")
-    print(f"💾 Saving examples with {save_probability*100:.1f}% probability...")
+    print(f"Saving examples with {save_probability*100:.1f}% probability...")
 
     for i, sample in enumerate(dataset):
         # Use the pipeline for transcription with automatic chunking

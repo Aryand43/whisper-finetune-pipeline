@@ -5,9 +5,19 @@ from transformers import WhisperForConditionalGeneration
 from model_aggregation import average_checkpoints_structured
 import hashlib
 
-def hash_state_dict(state_dict):
-    total_bytes = b''.join([v.cpu().numpy().tobytes() for v in state_dict.values() if isinstance(v, torch.Tensor)])
-    return hashlib.sha256(total_bytes).hexdigest()
+def robust_hash_state_dict(state_dict):
+    def extract_tensor_bytes(d):
+        tensor_bytes = []
+        for key in sorted(d.keys()):  # ensures order doesn't affect the hash
+            v = d[key]
+            if isinstance(v, dict):
+                tensor_bytes.extend(extract_tensor_bytes(v))
+            elif isinstance(v, torch.Tensor):
+                tensor_bytes.append(v.detach().cpu().numpy().tobytes())
+        return tensor_bytes
+
+    all_bytes = b''.join(extract_tensor_bytes(state_dict))
+    return hashlib.sha256(all_bytes).hexdigest()
 
 def main():
     parser = argparse.ArgumentParser()
@@ -29,7 +39,7 @@ def main():
     temp_save_path = "/tmp/temp_avg_model.bin"
     avg_state_dict = average_checkpoints_structured(args.checkpoints, weights, temp_save_path)
     
-    print(f"Hash of aggregated state dict: {hash_state_dict(avg_state_dict)}")
+    print(f"Hash of aggregated state dict: {robust_hash_state_dict(avg_state_dict)}")
 
     # Clean up the temporary file since we don't need it
     if os.path.exists(temp_save_path):
