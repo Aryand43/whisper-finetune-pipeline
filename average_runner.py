@@ -6,9 +6,12 @@ from model_aggregation import average_checkpoints_structured
 import hashlib
 
 def robust_hash_state_dict(state_dict):
+    if "model_state_dict" in state_dict:
+        state_dict = state_dict["model_state_dict"]
+
     def extract_tensor_bytes(d):
         tensor_bytes = []
-        for key in sorted(d.keys()):  # ensures order doesn't affect the hash
+        for key in sorted(d.keys()):
             v = d[key]
             if isinstance(v, dict):
                 tensor_bytes.extend(extract_tensor_bytes(v))
@@ -39,7 +42,7 @@ def main():
     temp_save_path = "/tmp/temp_avg_model.bin"
     avg_state_dict = average_checkpoints_structured(args.checkpoints, weights, temp_save_path)
     
-    print(f"Hash of aggregated state dict: {robust_hash_state_dict(avg_state_dict)}")
+    print(f"Hash of aggregated state dict: {robust_hash_state_dict(avg_state_dict['model_state_dict'])}")
 
     # Clean up the temporary file since we don't need it
     if os.path.exists(temp_save_path):
