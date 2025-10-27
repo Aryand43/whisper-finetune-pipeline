@@ -189,8 +189,9 @@ def main():
     
     print(f"Dataset size: {len(dataset)} samples")
     
-    
-    dataset = dataset.map(force_decode_with_torchaudio)
+    # Removed dataset.map(force_decode_with_torchaudio) as it caused std::bad_alloc
+    # The pipeline should handle audio loading from the 'audio' column directly.
+    # dataset = dataset.map(force_decode_with_torchaudio)
     dataset = dataset.with_format("python")
 
     print(f"🎯 Starting transcription...")
