@@ -167,7 +167,7 @@ def force_decode_with_torchaudio(example):
         "transcription": example["sentence"] if "sentence" in example else example["text"],
     }
 
-def main():
+def main(preloaded_dataset=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_dir", type=str, required=True, help="Directory of HF-style model folder")
     parser.add_argument("--dataset_name", type=str, required=True)
@@ -183,10 +183,20 @@ def main():
     pipe, processor = load_model_and_pipeline(args.model_dir, precision=args.precision)
 
     print(f"📚 Loading dataset: {args.dataset_name}")
-    if args.dataset_config:
-        dataset = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
+    if preloaded_dataset is not None:
+        dataset = preloaded_dataset
+        print(f"Using pre-loaded dataset for {args.dataset_name}")
     else:
-        dataset = load_dataset(args.dataset_name, split=args.split)
+        # Clean up any residual dataset script that might cause conflicts
+        dataset_script_path = os.path.join(os.getcwd(), f"{args.dataset_name}.py")
+        if os.path.exists(dataset_script_path):
+            print(f"❗ Found conflicting dataset script {dataset_script_path}. Removing it.")
+            os.remove(dataset_script_path)
+
+        if args.dataset_config:
+            dataset = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
+        else:
+            dataset = load_dataset(args.dataset_name, split=args.split)
     
     print(f"Dataset size: {len(dataset)} samples")
     
