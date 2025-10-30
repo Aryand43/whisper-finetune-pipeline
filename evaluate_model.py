@@ -176,6 +176,7 @@ def main():
     parser.add_argument("--precision", type=str, default="float16", choices=["fp32", "float16", "int8"])
     parser.add_argument("--examples_csv", type=str, default="evaluation_examples.csv", help="Path to save example CSV")
     parser.add_argument("--metrics_csv", type=str, default="evaluation_metrics.csv", help="Path to save metrics CSV")
+    parser.add_argument("--wandb_run_name", type=str, default="evaluation_run", help="Name for the Weights & Biases run")
     args = parser.parse_args()
 
     print(f"🚀 Loading model from: {args.model_dir}")
@@ -227,11 +228,12 @@ def main():
     # Log to wandb if configured
     if os.getenv("WANDB_API_KEY"):
         print(f"📡 Logging to wandb...")
-        wandb.login(key=os.getenv("WANDB_API_KEY"))
+        # wandb.login(key=os.getenv("WANDB_API_KEY")) # Removed as API key should already be set
         wandb.init(
             project=os.getenv("WANDB_PROJECT"),
             entity=os.getenv("WANDB_ENTITY"),
-            name=f"eval-{args.model_dir.replace('/', '-')}-{args.precision}"
+            name=args.wandb_run_name, # Use the new argument here
+            reinit=True # Ensure multiple runs can be started in a single session
         )
         wandb.log({
             **metrics,
