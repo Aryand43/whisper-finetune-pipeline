@@ -11,6 +11,7 @@ import os
 from dotenv import load_dotenv
 import random
 import hashlib
+from datasets import Audio
 
 # Load env variables
 load_dotenv()
@@ -167,7 +168,7 @@ def force_decode_with_torchaudio(example):
         "transcription": example["sentence"] if "sentence" in example else example["text"],
     }
 
-def main(preloaded_dataset=None):
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_dir", type=str, required=True, help="Directory of HF-style model folder")
     parser.add_argument("--dataset_name", type=str, required=True)
@@ -183,27 +184,39 @@ def main(preloaded_dataset=None):
     pipe, processor = load_model_and_pipeline(args.model_dir, precision=args.precision)
 
     print(f"📚 Loading dataset: {args.dataset_name}")
-    if preloaded_dataset is not None:
-        dataset = preloaded_dataset
-        print(f"Using pre-loaded dataset for {args.dataset_name}")
-    else:
-        # Clean up any residual dataset script that might cause conflicts
-        dataset_script_path = os.path.join(os.getcwd(), f"{args.dataset_name}.py")
-        if os.path.exists(dataset_script_path):
-            print(f"❗ Found conflicting dataset script {dataset_script_path}. Removing it.")
-            os.remove(dataset_script_path)
-
-        if args.dataset_config:
-            dataset = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
-        else:
-            dataset = load_dataset(args.dataset_name, split=args.split)
     
+    # New logic for versatile dataset loading
+    if args.dataset_name == "local_tsv":
+        print(f"Loading local TSV dataset from: {args.dataset_config}")
+        # Assuming args.dataset_config will be the path to the TSV file itself
+        local_dataset_path = args.dataset_config
+        dataset = load_dataset("csv", data_files={"train": local_dataset_path}, delimiter='\t', split="train")
+
+        # Assuming audio files are relative to the TSV file's directory
+        # You might need to adjust this path_template based on your exact audio file locations
+        tsv_dir = os.path.dirname(local_dataset_path)
+        dataset = dataset.cast_column(
+            "path", 
+            Audio(sampling_rate=16000, decode=True, path_template=os.path.join(tsv_dir, "{path}"))
+        )
+
+        dataset = dataset.rename_column("path", "audio")
+        dataset = dataset.rename_column("sentence", "text") # Assuming 'sentence' is the transcript column
+    elif args.dataset_config:
+        print(f"Loading Hugging Face dataset: {args.dataset_name} config: {args.dataset_config}")
+        dataset = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
+    else:
+        print(f"Loading Hugging Face dataset: {args.dataset_name}")
+        dataset = load_dataset(args.dataset_name, split=args.split)
+    
+    dataset = dataset.with_format("python")
+
     print(f"Dataset size: {len(dataset)} samples")
     
     # Removed dataset.map(force_decode_with_torchaudio) as it caused std::bad_alloc
     # The pipeline should handle audio loading from the 'audio' column directly.
     # dataset = dataset.map(force_decode_with_torchaudio)
-    dataset = dataset.with_format("python")
+    # dataset = dataset.with_format("python") # Moved up for clarity
 
     print(f"🎯 Starting transcription...")
     predictions, references, saved_examples = transcribe_dataset(pipe, dataset, save_probability=1)
