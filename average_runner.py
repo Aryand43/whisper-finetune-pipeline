@@ -4,6 +4,7 @@ import os
 from transformers import WhisperForConditionalGeneration
 from model_aggregation import average_checkpoints_structured
 import hashlib
+import wandb # Import wandb
 
 def robust_hash_state_dict(state_dict):
     if "model_state_dict" in state_dict:
@@ -27,8 +28,12 @@ def main():
     parser.add_argument("--checkpoints", nargs="+", required=True, help="List of .pt model paths")
     parser.add_argument("--weights", nargs="+", type=float, help="Optional list of weights")
     parser.add_argument("--save_dir", default="whisper-aggregated", help="Directory to save HuggingFace-compatible model")
+    parser.add_argument("--wandb_run_name", type=str, default="model_aggregation_run", help="Name for the Weights & Biases run")
     args = parser.parse_args()
 
+    # Initialize Weights & Biases run
+    run = wandb.init(project="whisper-finetune-pipeline", job_type="model_aggregation", name=args.wandb_run_name, reinit=True)
+    
     if args.weights:
         assert len(args.weights) == len(args.checkpoints), "Weights must match checkpoints"
         weights = args.weights
@@ -78,6 +83,14 @@ def main():
 
     print(f"HF model and processor saved to: {args.save_dir}")
     print("Model aggregation completed successfully!")
+
+    # Log the saved model directory as a W&B artifact
+    artifact = wandb.Artifact(name="aggregated_whisper_model", type="model")
+    artifact.add_dir(args.save_dir)
+    run.log_artifact(artifact)
+    
+    # Finish the W&B run
+    wandb.finish()
 
 if __name__ == "__main__":
     main()
