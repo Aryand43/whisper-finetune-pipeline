@@ -22,8 +22,9 @@ CHECKPOINTS = [
     "checkpoints/eager-haze-6.pt",
 ]
 BASE_SAVE_DIR = Path("whisper-aggregated")
-EVALUATION_DATASET = "mozilla-foundation/common_voice_17_0"
-EVALUATION_CONFIG = "gsw"
+EVALUATION_DATASET = "i4ds/spc_r"
+EVALUATION_CONFIG = None
+EVALUATION_SPLIT = "test"
 
 
 def run_aggregation_and_eval():
@@ -76,8 +77,8 @@ def run_aggregation_and_eval():
             str(save_dir),
             "--dataset_name",
             EVALUATION_DATASET,
-            "--dataset_config",
-            EVALUATION_CONFIG,
+            "--split",
+            EVALUATION_SPLIT,
             "--precision",
             "float16",
             "--examples_csv",
@@ -85,6 +86,9 @@ def run_aggregation_and_eval():
             "--metrics_csv",
             str(metrics_csv),
         ]
+
+        if EVALUATION_CONFIG:
+            eval_cmd.extend(["--dataset_config", EVALUATION_CONFIG])
 
         if missing_checkpoints:
             print(f"[SANITY CHECK] Would run evaluation command:\n{' '.join(eval_cmd)}")

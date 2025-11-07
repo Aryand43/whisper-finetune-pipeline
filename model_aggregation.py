@@ -51,11 +51,13 @@ def average_checkpoints(
         state_dict = ref_state if idx == 0 else _load_state_dict(checkpoint_path)
 
         if idx > 0:
-            assert set(state_dict.keys()) == set(ref_keys), f"key mismatch at index {idx}"
+            assert set(state_dict.keys()) == set(
+                ref_keys
+            ), f"key mismatch at index {idx}"
             for key in ref_keys:
-                assert state_dict[key].shape == ref_state[key].shape, (
-                    f"shape mismatch for {key} at index {idx}"
-                )
+                assert (
+                    state_dict[key].shape == ref_state[key].shape
+                ), f"shape mismatch for {key} at index {idx}"
 
         for key, tensor in state_dict.items():
             if tensor.is_floating_point():
