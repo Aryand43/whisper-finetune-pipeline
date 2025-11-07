@@ -2,9 +2,10 @@ import argparse
 import torch
 import os
 from transformers import WhisperForConditionalGeneration
-from model_aggregation import average_checkpoints_structured
+from model_aggregation import average_checkpoints
 import hashlib
-import wandb # Import wandb
+import wandb  # Import wandb
+from convert_openai_to_hf import convert_openai_whisper_to_tfms
 
 def robust_hash_state_dict(state_dict):
     if "model_state_dict" in state_dict:
@@ -20,64 +21,89 @@ def robust_hash_state_dict(state_dict):
                 tensor_bytes.append(v.detach().cpu().numpy().tobytes())
         return tensor_bytes
 
-    all_bytes = b''.join(extract_tensor_bytes(state_dict))
+    all_bytes = b"".join(extract_tensor_bytes(state_dict))
     return hashlib.sha256(all_bytes).hexdigest()
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoints", nargs="+", required=True, help="List of .pt model paths")
-    parser.add_argument("--weights", nargs="+", type=float, help="Optional list of weights")
-    parser.add_argument("--save_dir", default="whisper-aggregated", help="Directory to save HuggingFace-compatible model")
-    parser.add_argument("--wandb_run_name", type=str, default="model_aggregation_run", help="Name for the Weights & Biases run")
+    parser.add_argument(
+        "--checkpoints", nargs="+", required=True, help="List of .pt model paths"
+    )
+    parser.add_argument(
+        "--weights", nargs="+", type=float, help="Optional list of weights"
+    )
+    parser.add_argument(
+        "--save_dir",
+        default="whisper-aggregated",
+        help="Directory to save HuggingFace-compatible model",
+    )
+    parser.add_argument(
+        "--use_float64",
+        action="store_true",
+        help="Use float64 for accumulation during averaging",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default="model_aggregation_run",
+        help="Name for the Weights & Biases run",
+    )
     args = parser.parse_args()
 
     # Initialize Weights & Biases run
-    run = wandb.init(project="whisper-finetune-pipeline", job_type="model_aggregation", name=args.wandb_run_name, reinit=True)
-    
+    run = wandb.init(
+        entity="Whisper-FL-Evaluation",
+        project="whisper-finetune-pipeline",
+        job_type="model_aggregation",
+        name=args.wandb_run_name,
+        reinit=True,
+    )
+
     if args.weights:
-        assert len(args.weights) == len(args.checkpoints), "Weights must match checkpoints"
+        assert len(args.weights) == len(
+            args.checkpoints
+        ), "Weights must match checkpoints"
         weights = args.weights
     else:
         weights = [1.0 / len(args.checkpoints)] * len(args.checkpoints)
 
     # Step 1: Average the checkpoints while preserving structure
     print("Averaging checkpoints...")
-    # Use the function from model_aggregation.py but we don't need the file save
-    # So we'll just get the averaged state dict by calling it without save_path
-    temp_save_path = "/tmp/temp_avg_model.bin"
-    avg_state_dict = average_checkpoints_structured(args.checkpoints, weights, temp_save_path)
-    
-    print(f"Hash of aggregated state dict: {robust_hash_state_dict(avg_state_dict['model_state_dict'])}")
+    # Load in the state dicts from the checkpoint files
+    state_dicts = []
+    for ckpt_path in args.checkpoints:
+        print(f"Loading checkpoint: {ckpt_path}")
+        ft_model, _, _ = convert_openai_whisper_to_tfms(ckpt_path, "temp_converted_model")
+        state_dicts.append(ft_model.state_dict())
+    avg_state_dict = average_checkpoints(
+        args.checkpoints, weights, 
+    )
 
-    # Clean up the temporary file since we don't need it
-    if os.path.exists(temp_save_path):
-        os.remove(temp_save_path)
+    print(
+        f"Hash of aggregated state dict: {robust_hash_state_dict(avg_state_dict['model_state_dict'])}"
+    )
 
     # Step 2: Load the base whisper-large-v3-turbo model
     print("Loading base whisper-large-v3-turbo model...")
-    base_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v3-turbo")
-    
+    base_model = WhisperForConditionalGeneration.from_pretrained(
+        "openai/whisper-large-v3-turbo"
+    )
+
     # Step 3: Overwrite the model weights with averaged weights
     print("Loading averaged weights into model...")
-    try:
-        # Try to load the state dict, handling potential key mismatches
-        missing_keys, unexpected_keys = base_model.load_state_dict(avg_state_dict, strict=False)
-        
-        if missing_keys:
-            print(f"Warning: Missing keys in averaged model: {missing_keys[:5]}...")  # Show first 5
-        if unexpected_keys:
-            print(f"Warning: Unexpected keys in averaged model: {unexpected_keys[:5]}...")  # Show first 5
-            
-    except Exception as e:
-        print(f"Error loading state dict: {e}")
-    
+
+    # Try to load the state dict, handling potential key mismatches
+    _, _ = base_model.load_state_dict(avg_state_dict, strict=True)
+
     # Step 4: Save the model using save_pretrained
     print(f"Saving aggregated model to: {args.save_dir}")
     os.makedirs(args.save_dir, exist_ok=True)
     base_model.save_pretrained(args.save_dir)
-    
+
     # Also save the processor for completeness
     from transformers import WhisperProcessor
+
     processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3-turbo")
     processor.save_pretrained(args.save_dir)
 
@@ -88,9 +114,10 @@ def main():
     artifact = wandb.Artifact(name="aggregated_whisper_model", type="model")
     artifact.add_dir(args.save_dir)
     run.log_artifact(artifact)
-    
+
     # Finish the W&B run
     wandb.finish()
+
 
 if __name__ == "__main__":
     main()
