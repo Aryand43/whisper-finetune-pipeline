@@ -74,13 +74,17 @@ def normalize_text(text: str) -> str:
     return re.sub(r"[^\w\s]", "", text.lower())
 
 
-def transcribe_dataset(pipe, dataset, save_probability):
+def transcribe_dataset(pipe, dataset, save_probability, total_samples=None):
     """Transcribe dataset using pipeline with 30-second chunking support."""
     predictions = []
     references = []
     saved_examples = []
-    total_samples = len(dataset)
-    print(f"Transcribing {total_samples} samples with 30-second chunking...")
+
+    if total_samples is not None:
+        print(f"Transcribing {total_samples} samples with 30-second chunking...")
+    else:
+        print("Transcribing streamed samples with 30-second chunking...")
+
     print(f"Saving examples with {save_probability*100:.1f}% probability...")
 
     for i, sample in enumerate(dataset):
@@ -112,12 +116,19 @@ def transcribe_dataset(pipe, dataset, save_probability):
 
         # Progress indicator
         if (i + 1) % 10 == 0:
-            print(
-                f"Processed {i + 1}/{total_samples} samples (saved {len(saved_examples)} examples so far)"
-            )
+            if total_samples is not None:
+                print(
+                    f"Processed {i + 1}/{total_samples} samples (saved {len(saved_examples)} examples so far)"
+                )
+            else:
+                print(
+                    f"Processed {i + 1} samples (streaming) (saved {len(saved_examples)} examples so far)"
+                )
 
+    processed = len(predictions)
+    saved_pct = (len(saved_examples) / processed * 100) if processed else 0.0
     print(
-        f"📊 Final: Processed {len(predictions)} samples, saved {len(saved_examples)} examples ({len(saved_examples)/len(predictions)*100:.1f}%)"
+        f"📊 Final: Processed {processed} samples, saved {len(saved_examples)} examples ({saved_pct:.1f}%)"
     )
     return predictions, references, saved_examples
 
@@ -212,6 +223,11 @@ def main():
     )
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Enable datasets streaming mode to avoid full downloads",
+    )
+    parser.add_argument(
         "--precision", type=str, default="float16", choices=["fp32", "float16", "int8"]
     )
     parser.add_argument(
@@ -238,9 +254,12 @@ def main():
     pipe, processor = load_model_and_pipeline(args.model_dir, precision=args.precision)
 
     print(f"📚 Loading dataset: {args.dataset_name}")
+    streaming_suffix = " (streaming enabled)" if args.stream else ""
 
     # New logic for versatile dataset loading
     if args.dataset_name == "local_tsv":
+        if args.stream:
+            raise ValueError("Streaming is not supported for local TSV datasets.")
         print(f"Loading local TSV dataset from: {args.dataset_config}")
         # Assuming args.dataset_config will be the path to the TSV file itself
         local_dataset_path = args.dataset_config
@@ -267,18 +286,35 @@ def main():
         dataset = dataset.rename_column(
             "sentence", "text"
         )  # Assuming 'sentence' is the transcript column
-    elif args.dataset_config:
-        print(
-            f"Loading Hugging Face dataset: {args.dataset_name} config: {args.dataset_config}"
-        )
-        dataset = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
     else:
-        print(f"Loading Hugging Face dataset: {args.dataset_name}")
-        dataset = load_dataset(args.dataset_name, split=args.split)
+        if args.dataset_config:
+            print(
+                f"Loading Hugging Face dataset: {args.dataset_name} config: {args.dataset_config}{streaming_suffix}"
+            )
+        else:
+            print(
+                f"Loading Hugging Face dataset: {args.dataset_name}{streaming_suffix}"
+            )
+
+        load_kwargs = {"split": args.split}
+        if args.stream:
+            load_kwargs["streaming"] = True
+
+        if args.dataset_config:
+            dataset = load_dataset(
+                args.dataset_name, args.dataset_config, **load_kwargs
+            )
+        else:
+            dataset = load_dataset(args.dataset_name, **load_kwargs)
+
+    try:
+        dataset_length = len(dataset)
+        print(f"Dataset size: {dataset_length} samples")
+    except TypeError:
+        dataset_length = None
+        print("Dataset size: streaming (length unknown)")
 
     dataset = dataset.with_format("python")
-
-    print(f"Dataset size: {len(dataset)} samples")
 
     # Removed dataset.map(force_decode_with_torchaudio) as it caused std::bad_alloc
     # The pipeline should handle audio loading from the 'audio' column directly.
@@ -287,7 +323,7 @@ def main():
 
     print(f"🎯 Starting transcription...")
     predictions, references, saved_examples = transcribe_dataset(
-        pipe, dataset, save_probability=1
+        pipe, dataset, save_probability=1, total_samples=dataset_length
     )
     # Save examples to CSV (before normalization)
     print(f"💾 Saving examples...")

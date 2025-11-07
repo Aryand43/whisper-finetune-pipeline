@@ -25,6 +25,7 @@ BASE_SAVE_DIR = Path("whisper-aggregated")
 EVALUATION_DATASET = "i4ds/spc_r"
 EVALUATION_CONFIG = None
 EVALUATION_SPLIT = "test"
+EVALUATION_STREAM = True
 
 
 def run_aggregation_and_eval():
@@ -89,6 +90,9 @@ def run_aggregation_and_eval():
 
         if EVALUATION_CONFIG:
             eval_cmd.extend(["--dataset_config", EVALUATION_CONFIG])
+
+        if EVALUATION_STREAM:
+            eval_cmd.append("--stream")
 
         if missing_checkpoints:
             print(f"[SANITY CHECK] Would run evaluation command:\n{' '.join(eval_cmd)}")
