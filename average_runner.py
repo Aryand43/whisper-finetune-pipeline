@@ -5,7 +5,7 @@ from transformers import WhisperForConditionalGeneration
 from model_aggregation import average_checkpoints
 import hashlib
 import wandb  # Import wandb
-from convert_openai_to_hf import convert_openai_whisper_to_tfms
+
 
 def robust_hash_state_dict(state_dict):
     if "model_state_dict" in state_dict:
@@ -53,7 +53,7 @@ def main():
 
     # Initialize Weights & Biases run
     run = wandb.init(
-        entity="Whisper-FL-Evaluation",
+        entity="aryan-dutt43-whisper-federated",
         project="whisper-finetune-pipeline",
         job_type="model_aggregation",
         name=args.wandb_run_name,
@@ -70,19 +70,13 @@ def main():
 
     # Step 1: Average the checkpoints while preserving structure
     print("Averaging checkpoints...")
-    # Load in the state dicts from the checkpoint files
-    state_dicts = []
-    for ckpt_path in args.checkpoints:
-        print(f"Loading checkpoint: {ckpt_path}")
-        ft_model, _, _ = convert_openai_whisper_to_tfms(ckpt_path, "temp_converted_model")
-        state_dicts.append(ft_model.state_dict())
     avg_state_dict = average_checkpoints(
-        args.checkpoints, weights, 
+        args.checkpoints,
+        weights,
+        use_float64=args.use_float64,
     )
 
-    print(
-        f"Hash of aggregated state dict: {robust_hash_state_dict(avg_state_dict['model_state_dict'])}"
-    )
+    print(f"Hash of aggregated state dict: {robust_hash_state_dict(avg_state_dict)}")
 
     # Step 2: Load the base whisper-large-v3-turbo model
     print("Loading base whisper-large-v3-turbo model...")

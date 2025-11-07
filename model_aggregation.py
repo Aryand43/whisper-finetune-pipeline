@@ -1,52 +1,74 @@
+from collections import OrderedDict
+from typing import List, Optional
+
 import torch
-import os
-from typing import List, Optional, OrderedDict
+
+from convert_openai_to_hf import convert_openai_whisper_to_tfms
 
 
 # -----------------------------
 # Checkpoint Averaging
 # -----------------------------
 def average_checkpoints(
-    state_dicts: List[str],
+    checkpoint_paths: List[str],
     weights: Optional[List[float]] = None,
     use_float64: bool = True,
 ) -> OrderedDict:
-    """Exact key match, CPU only, optional float64 accumulation."""
-    assert len(state_dicts) >= 1, "need at least one state_dict"
-    ref = state_dicts[0]
-    ref_keys = list(ref.keys())
+    """Average checkpoint weights without storing every state dict in memory."""
 
-    # key and shape match
-    for i, sd in enumerate(state_dicts[1:], 1):
-        assert set(sd.keys()) == set(ref_keys), f"key mismatch at index {i}"
-        for k in ref_keys:
-            assert sd[k].shape == ref[k].shape, f"shape mismatch for {k} at index {i}"
+    assert checkpoint_paths, "need at least one checkpoint"
 
-    # normalize weights
-    assert abs(float(sum(weights))) - 1 < 1e-6, "weights must sum to 1"
+    if weights is None:
+        weights = [1.0 / len(checkpoint_paths)] * len(checkpoint_paths)
 
-    # initialize accumulator
-    out = OrderedDict()
+    assert len(weights) == len(checkpoint_paths), "weights must match checkpoints"
+
+    weight_total = float(sum(weights))
+    assert abs(weight_total - 1.0) < 1e-6, "weights must sum to 1"
+
+    def _load_state_dict(path: str) -> OrderedDict:
+        print(f"Loading checkpoint: {path}")
+        model, _, _ = convert_openai_whisper_to_tfms(path, "temp_converted_model")
+        state_dict = model.state_dict()
+        for key, value in state_dict.items():
+            if isinstance(value, torch.Tensor):
+                state_dict[key] = value.cpu()
+        del model
+        return state_dict
+
+    ref_state = _load_state_dict(checkpoint_paths[0])
+    ref_keys = list(ref_state.keys())
+
     acc = {}
-    # Fill up accumulator with zeros
-    for k, t0 in ref.items():
-        if t0.is_floating_point():
+    for key, tensor in ref_state.items():
+        if tensor.is_floating_point():
             dtype = torch.float64 if use_float64 else torch.float32
-            acc[k] = torch.zeros_like(t0.cpu(), dtype=dtype)
+            acc[key] = torch.zeros_like(tensor, dtype=dtype)
         else:
-            acc[k] = None
+            acc[key] = None
 
-    # accumulate
-    for sd, w in zip(state_dicts, weights):
-        for k, t in sd.items():
-            if t.is_floating_point():
-                acc[k].add_(t.cpu().to(dtype=acc[k].dtype), alpha=w)
+    for idx, (checkpoint_path, weight) in enumerate(zip(checkpoint_paths, weights)):
+        state_dict = ref_state if idx == 0 else _load_state_dict(checkpoint_path)
 
-    # finalize output by casting back to original dtypes
-    for k, t0 in ref.items():
-        if t0.is_floating_point():
-            out[k] = acc[k].to(dtype=t0.dtype)
+        if idx > 0:
+            assert set(state_dict.keys()) == set(ref_keys), f"key mismatch at index {idx}"
+            for key in ref_keys:
+                assert state_dict[key].shape == ref_state[key].shape, (
+                    f"shape mismatch for {key} at index {idx}"
+                )
+
+        for key, tensor in state_dict.items():
+            if tensor.is_floating_point():
+                acc[key].add_(tensor.to(acc[key].dtype), alpha=weight)
+
+        if idx > 0:
+            del state_dict
+
+    out = OrderedDict()
+    for key, tensor in ref_state.items():
+        if tensor.is_floating_point():
+            out[key] = acc[key].to(dtype=tensor.dtype)
         else:
-            out[k] = t0.clone().cpu()
+            out[key] = tensor.clone()
 
     return out
