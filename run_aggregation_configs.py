@@ -1,6 +1,7 @@
-import os
 import subprocess
 from pathlib import Path
+
+from evaluate_model import evaluate_model
 
 AGGREGATION_STRATEGIES = [
     {"name": "equal_avg", "weights": [0.25, 0.25, 0.25, 0.25]},
@@ -25,7 +26,6 @@ BASE_SAVE_DIR = Path("whisper-aggregated")
 EVALUATION_DATASET = "i4ds/spc_r"
 EVALUATION_CONFIG = None
 EVALUATION_SPLIT = "test"
-EVALUATION_STREAM = True
 
 
 def run_aggregation_and_eval():
@@ -68,42 +68,30 @@ def run_aggregation_and_eval():
             print(f"Running aggregation command:\n{' '.join(aggregate_cmd)}")
             subprocess.run(aggregate_cmd, check=True)
 
-        # Evaluation command
         examples_csv = save_dir / "evaluation_examples.csv"
         metrics_csv = save_dir / "evaluation_metrics.csv"
-        eval_cmd = [
-            "python",
-            "evaluate_model.py",
-            "--model_dir",
-            str(save_dir),
-            "--dataset_name",
-            EVALUATION_DATASET,
-            "--split",
-            EVALUATION_SPLIT,
-            "--precision",
-            "float16",
-            "--examples_csv",
-            str(examples_csv),
-            "--metrics_csv",
-            str(metrics_csv),
-        ]
-
-        if EVALUATION_CONFIG:
-            eval_cmd.extend(["--dataset_config", EVALUATION_CONFIG])
-
-        if EVALUATION_STREAM:
-            eval_cmd.append("--stream")
 
         if missing_checkpoints:
-            print(f"[SANITY CHECK] Would run evaluation command:\n{' '.join(eval_cmd)}")
+            print(
+                "[SANITY CHECK] Would run evaluation via evaluate_model()",
+            )
         else:
-            print(f"Running evaluation command:\n{' '.join(eval_cmd)}")
-            subprocess.run(eval_cmd, check=True)
+            print("Evaluating aggregated model via evaluate_model()")
+            metrics = evaluate_model(
+                model_dir=str(save_dir),
+                dataset_name=EVALUATION_DATASET,
+                split=EVALUATION_SPLIT,
+                dataset_config=EVALUATION_CONFIG,
+                precision="float16",
+                examples_csv=str(examples_csv),
+                metrics_csv=str(metrics_csv),
+            )
+            print(f"   Metrics: {metrics}")
+            print(f"   Examples CSV: {examples_csv}")
+            print(f"   Metrics CSV: {metrics_csv}")
 
         print(f"   Completed strategy: {name}")
         print(f"   Aggregated model: {save_dir}")
-        print(f"   Examples CSV: {examples_csv}")
-        print(f"   Metrics CSV: {metrics_csv}")
 
 
 if __name__ == "__main__":

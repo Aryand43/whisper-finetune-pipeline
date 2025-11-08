@@ -1,393 +1,283 @@
-import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
-import re
-import evaluate
-import sacrebleu
 import argparse
 import csv
-import wandb
-from datasets import load_dataset, config as datasets_config
-import os
-from dotenv import load_dotenv
-import random
 import hashlib
-from datasets import Audio
+import os
+import re
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-# Load env variables
+import evaluate
+import sacrebleu
+import torch
+import wandb
+from datasets import Audio, config as datasets_config, load_dataset
+from dotenv import load_dotenv
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+
 load_dotenv()
 datasets_config.HF_DATASETS_AUDIO_BACKEND = "torchaudio"
 
 
-def robust_hash_state_dict(state_dict):
-    if "model_state_dict" in state_dict:
-        state_dict = state_dict["model_state_dict"]
+def robust_hash_state_dict(state_dict: Dict[str, Any]) -> str:
+    """Create a SHA256 hash for a (possibly nested) state dict."""
 
-    def extract_tensor_bytes(d):
-        tensor_bytes = []
-        for key in sorted(d.keys()):
-            v = d[key]
-            if isinstance(v, dict):
-                tensor_bytes.extend(extract_tensor_bytes(v))
-            elif isinstance(v, torch.Tensor):
-                tensor_bytes.append(v.detach().cpu().numpy().tobytes())
+    def extract_tensor_bytes(node: Dict[str, Any]) -> List[bytes]:
+        tensor_bytes: List[bytes] = []
+        for key in sorted(node.keys()):
+            value = node[key]
+            if isinstance(value, dict):
+                tensor_bytes.extend(extract_tensor_bytes(value))
+            elif isinstance(value, torch.Tensor):
+                tensor_bytes.append(value.detach().cpu().numpy().tobytes())
         return tensor_bytes
 
-    all_bytes = b"".join(extract_tensor_bytes(state_dict))
-    return hashlib.sha256(all_bytes).hexdigest()
+    flat_bytes = b"".join(extract_tensor_bytes(state_dict))
+    return hashlib.sha256(flat_bytes).hexdigest()
 
 
 def load_model_and_pipeline(model_dir: str, precision: str = "float16"):
-    """Load model and create pipeline with chunking support."""
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    torch_dtype = (
-        torch.float16
-        if torch.cuda.is_available() and precision == "float16"
-        else torch.float32
-    )
+    """Load Whisper model weights and return a ready-to-use ASR pipeline."""
 
-    # Try to load from the model directory first, fallback to base model
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    precision = precision.lower()
+    if precision not in {"float16", "fp32", "float32"}:
+        raise ValueError(f"Unsupported precision: {precision}")
+
+    torch_dtype = torch.float16 if (precision == "float16" and device != "cpu") else torch.float32
+
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_dir, torch_dtype=torch_dtype, low_cpu_mem_usage=True
+        model_dir,
+        torch_dtype=torch_dtype,
+        low_cpu_mem_usage=True,
     )
     processor = AutoProcessor.from_pretrained(model_dir)
-    print(f"Loaded model and processor from model directory: {model_dir}")
-
     model.to(device)
+
+    print(f"Loaded model from {model_dir}")
     print(f"Model weight SHA256 hash: {robust_hash_state_dict(model.state_dict())}")
 
-    # Create pipeline with chunking support
-    pipe = pipeline(
-        "automatic-speech-recognition",
+    return pipeline(
+        task="automatic-speech-recognition",
         model=model,
         tokenizer=processor.tokenizer,
         feature_extractor=processor.feature_extractor,
         chunk_length_s=30,
-        batch_size=16,  # batch size for inference - set based on your device
-        torch_dtype=torch_dtype,
+        batch_size=8,
+        torch_dtype=torch_dtype if device != "cpu" else torch.float32,
         device=device,
     )
 
-    return pipe, processor
-
 
 def normalize_text(text: str) -> str:
-    return re.sub(r"[^\w\s]", "", text.lower())
+    """Lowercase and strip punctuation/extra whitespace for stable metrics."""
+
+    text = re.sub(r"[^\w\s]", " ", text.lower())
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
-def transcribe_dataset(pipe, dataset, save_probability, total_samples=None):
-    """Transcribe dataset using pipeline with 30-second chunking support."""
-    predictions = []
-    references = []
-    saved_examples = []
+def transcribe_dataset(
+    asr_pipe,
+    dataset: Iterable[Dict[str, Any]],
+    max_saved_examples: int = 20,
+) -> Tuple[List[str], List[str], List[Dict[str, Any]]]:
+    """Stream the dataset, collect predictions, and keep the first few examples."""
 
-    if total_samples is not None:
-        print(f"Transcribing {total_samples} samples with 30-second chunking...")
-    else:
-        print("Transcribing streamed samples with 30-second chunking...")
+    predictions: List[str] = []
+    references: List[str] = []
+    saved_examples: List[Dict[str, Any]] = []
 
-    print(f"Saving examples with {save_probability*100:.1f}% probability...")
+    print("Transcribing samples (streaming)...")
 
-    for i, sample in enumerate(dataset):
-        # Use the pipeline for transcription with automatic chunking
-        audio_data = {
-            "array": sample["audio"]["array"],
-            "sampling_rate": sample["audio"]["sampling_rate"],
-        }
+    for idx, sample in enumerate(dataset):
+        audio = sample["audio"]
+        reference = sample.get("text") or sample.get("sentence")
+        if reference is None:
+            raise ValueError("Dataset sample is missing a reference transcript.")
 
-        result = pipe(audio_data)
-        transcription = result["text"]
+        result = asr_pipe({"array": audio["array"], "sampling_rate": audio["sampling_rate"]})
+        prediction = result["text"]
 
-        predictions.append(transcription)
-        references.append(
-            sample["sentence"] if "sentence" in sample else sample["text"]
-        )
+        predictions.append(prediction)
+        references.append(reference)
 
-        # Randomly decide whether to save this example
-        if random.random() < save_probability:
+        if len(saved_examples) < max_saved_examples:
             saved_examples.append(
                 {
-                    "index": i,
-                    "prediction": transcription,
-                    "reference": (
-                        sample["sentence"] if "sentence" in sample else sample["text"]
-                    ),
+                    "index": idx,
+                    "prediction_raw": prediction,
+                    "reference_raw": reference,
+                    "prediction_normalized": normalize_text(prediction),
+                    "reference_normalized": normalize_text(reference),
                 }
             )
 
-        # Progress indicator
-        if (i + 1) % 10 == 0:
-            if total_samples is not None:
-                print(
-                    f"Processed {i + 1}/{total_samples} samples (saved {len(saved_examples)} examples so far)"
-                )
-            else:
-                print(
-                    f"Processed {i + 1} samples (streaming) (saved {len(saved_examples)} examples so far)"
-                )
+        if (idx + 1) % 10 == 0:
+            print(f"Processed {idx + 1} samples (streaming)")
 
-    processed = len(predictions)
-    saved_pct = (len(saved_examples) / processed * 100) if processed else 0.0
-    print(
-        f"📊 Final: Processed {processed} samples, saved {len(saved_examples)} examples ({saved_pct:.1f}%)"
-    )
+    print(f"Finished transcription for {len(predictions)} samples")
     return predictions, references, saved_examples
 
 
-def save_examples_to_csv(saved_examples, output_path="evaluation_examples.csv"):
-    """
-    Save randomly selected evaluation examples to CSV with both normalized and non-normalized versions.
+def save_examples_to_csv(saved_examples: List[Dict[str, Any]], output_path: Optional[str]) -> None:
+    if not output_path or not saved_examples:
+        return
 
-    Args:
-        saved_examples: List of dictionaries with 'index', 'prediction', 'reference' keys
-        output_path: Path to save the CSV file
-    """
-    if not saved_examples:
-        print("⚠️  No examples to save!")
-        return []
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    examples = []
-    for i, ex in enumerate(saved_examples):
-        pred_raw = ex["prediction"]
-        ref_raw = ex["reference"]
-        pred_normalized = normalize_text(pred_raw)
-        ref_normalized = normalize_text(ref_raw)
-
-        examples.append(
-            {
-                "sample_index": ex["index"],
-                "example_id": i + 1,
-                "reference_raw": ref_raw,
-                "prediction_raw": pred_raw,
-                "reference_normalized": ref_normalized,
-                "prediction_normalized": pred_normalized,
-            }
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "index",
+                "prediction_raw",
+                "reference_raw",
+                "prediction_normalized",
+                "reference_normalized",
+            ],
         )
-
-    # Save to CSV
-    with open(output_path, mode="w", newline="", encoding="utf-8") as file:
-        fieldnames = [
-            "sample_index",
-            "example_id",
-            "reference_raw",
-            "prediction_raw",
-            "reference_normalized",
-            "prediction_normalized",
-        ]
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(examples)
+        writer.writerows(saved_examples)
 
-    print(f"📄 Saved {len(examples)} examples to: {output_path}")
-
-    return examples
+    print(f"Saved {len(saved_examples)} examples to {path}")
 
 
-def evaluate_metrics(predictions, references):
-    """Compute WER and BLEU metrics on normalized text."""
+def write_metrics_to_csv(metrics: Dict[str, float], output_path: Optional[str]) -> None:
+    if not output_path:
+        return
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["metric", "value"])
+        for key, value in metrics.items():
+            writer.writerow([key, value])
+
+    print(f"Saved metrics to {path}")
+
+
+def evaluate_metrics(predictions: List[str], references: List[str]) -> Dict[str, float]:
     wer_metric = evaluate.load("wer")
     wer = wer_metric.compute(predictions=predictions, references=references)
     bleu = sacrebleu.corpus_bleu(predictions, [references]).score
     return {"wer": wer, "bleu": bleu}
 
 
-import torchaudio
+def log_metrics_to_wandb(
+    metrics: Dict[str, float],
+    model_dir: str,
+    dataset_name: str,
+    split: str,
+    precision: str,
+    sample_count: int,
+    run_name: Optional[str],
+) -> None:
+    if not os.getenv("WANDB_API_KEY"):
+        return
 
-
-def force_decode_with_torchaudio(example):
-    audio_array, sampling_rate = (
-        example["audio"]["array"],
-        example["audio"]["sampling_rate"],
+    wandb.init(
+        project=os.getenv("WANDB_PROJECT"),
+        entity=os.getenv("WANDB_ENTITY"),
+        name=run_name,
+        reinit=True,
     )
-    return {
-        "audio_array": audio_array,
-        "sampling_rate": sampling_rate,
-        "transcription": (
-            example["sentence"] if "sentence" in example else example["text"]
-        ),
-    }
+    wandb.log(
+        {
+            **metrics,
+            "model_dir": model_dir,
+            "dataset": dataset_name,
+            "split": split,
+            "precision": precision,
+            "samples": sample_count,
+        }
+    )
+    wandb.finish()
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model_dir",
-        type=str,
-        required=True,
-        help="Directory of HF-style model folder",
-    )
-    parser.add_argument("--dataset_name", type=str, required=True)
-    parser.add_argument(
-        "--dataset_config",
-        type=str,
-        help="Dataset configuration (e.g., 'gsw' for Swiss German)",
-    )
-    parser.add_argument("--split", type=str, default="test")
-    parser.add_argument(
-        "--stream",
-        action="store_true",
-        help="Enable datasets streaming mode to avoid full downloads",
-    )
-    parser.add_argument(
-        "--precision", type=str, default="float16", choices=["fp32", "float16", "int8"]
-    )
-    parser.add_argument(
-        "--examples_csv",
-        type=str,
-        default="evaluation_examples.csv",
-        help="Path to save example CSV",
-    )
-    parser.add_argument(
-        "--metrics_csv",
-        type=str,
-        default="evaluation_metrics.csv",
-        help="Path to save metrics CSV",
-    )
-    parser.add_argument(
-        "--wandb_run_name",
-        type=str,
-        default="evaluation_run",
-        help="Name for the Weights & Biases run",
-    )
-    args = parser.parse_args()
+def evaluate_model(
+    model_dir: str,
+    dataset_name: str,
+    split: str = "test",
+    dataset_config: Optional[str] = None,
+    precision: str = "float16",
+    examples_csv: Optional[str] = None,
+    metrics_csv: Optional[str] = None,
+    max_saved_examples: int = 20,
+    log_to_wandb: bool = True,
+    wandb_run_name: Optional[str] = None,
+) -> Dict[str, float]:
+    """Evaluate a Whisper checkpoint on a streaming Hugging Face dataset."""
 
-    print(f"🚀 Loading model from: {args.model_dir}")
-    pipe, processor = load_model_and_pipeline(args.model_dir, precision=args.precision)
+    asr_pipe = load_model_and_pipeline(model_dir, precision=precision)
 
-    print(f"📚 Loading dataset: {args.dataset_name}")
-    streaming_suffix = " (streaming enabled)" if args.stream else ""
-
-    # New logic for versatile dataset loading
-    if args.dataset_name == "local_tsv":
-        if args.stream:
-            raise ValueError("Streaming is not supported for local TSV datasets.")
-        print(f"Loading local TSV dataset from: {args.dataset_config}")
-        # Assuming args.dataset_config will be the path to the TSV file itself
-        local_dataset_path = args.dataset_config
-        dataset = load_dataset(
-            "csv",
-            data_files={"train": local_dataset_path},
-            delimiter="\t",
-            split="train",
-        )
-
-        # Assuming audio files are relative to the TSV file's directory
-        # You might need to adjust this path_template based on your exact audio file locations
-        tsv_dir = os.path.dirname(local_dataset_path)
-        dataset = dataset.cast_column(
-            "path",
-            Audio(
-                sampling_rate=16000,
-                decode=True,
-                path_template=os.path.join(tsv_dir, "{path}"),
-            ),
-        )
-
-        dataset = dataset.rename_column("path", "audio")
-        dataset = dataset.rename_column(
-            "sentence", "text"
-        )  # Assuming 'sentence' is the transcript column
+    load_kwargs = {"split": split, "streaming": True}
+    if dataset_config:
+        dataset = load_dataset(dataset_name, dataset_config, **load_kwargs)
     else:
-        if args.dataset_config:
-            print(
-                f"Loading Hugging Face dataset: {args.dataset_name} config: {args.dataset_config}{streaming_suffix}"
-            )
-        else:
-            print(
-                f"Loading Hugging Face dataset: {args.dataset_name}{streaming_suffix}"
-            )
+        dataset = load_dataset(dataset_name, **load_kwargs)
 
-        load_kwargs = {"split": args.split}
-        if args.stream:
-            load_kwargs["streaming"] = True
+    dataset = dataset.cast_column("audio", Audio(sampling_rate=16000))
 
-        if args.dataset_config:
-            dataset = load_dataset(
-                args.dataset_name, args.dataset_config, **load_kwargs
-            )
-        else:
-            dataset = load_dataset(args.dataset_name, **load_kwargs)
-
-    try:
-        dataset_length = len(dataset)
-        print(f"Dataset size: {dataset_length} samples")
-    except TypeError:
-        dataset_length = None
-        print("Dataset size: streaming (length unknown)")
-
-    dataset = dataset.with_format("python")
-
-    # Removed dataset.map(force_decode_with_torchaudio) as it caused std::bad_alloc
-    # The pipeline should handle audio loading from the 'audio' column directly.
-    # dataset = dataset.map(force_decode_with_torchaudio)
-    # dataset = dataset.with_format("python") # Moved up for clarity
-
-    print(f"🎯 Starting transcription...")
     predictions, references, saved_examples = transcribe_dataset(
-        pipe, dataset, save_probability=1, total_samples=dataset_length
+        asr_pipe,
+        dataset,
+        max_saved_examples=max_saved_examples,
     )
-    # Save examples to CSV (before normalization)
-    print(f"💾 Saving examples...")
-    save_examples_to_csv(saved_examples, args.examples_csv)
 
-    # Normalize for metrics computation
-    print(f"📊 Computing metrics...")
-    references_normalized = [normalize_text(ref) for ref in references]
-    predictions_normalized = [normalize_text(pred) for pred in predictions]
-    metrics = evaluate_metrics(predictions_normalized, references_normalized)
+    normalized_predictions = [normalize_text(p) for p in predictions]
+    normalized_references = [normalize_text(r) for r in references]
+    metrics = evaluate_metrics(normalized_predictions, normalized_references)
 
-    print(f"\n🎯 Results:")
-    print(f"  WER: {metrics['wer']:.4f}")
-    print(f"  BLEU: {metrics['bleu']:.2f}")
+    save_examples_to_csv(saved_examples, examples_csv)
+    write_metrics_to_csv(metrics, metrics_csv)
 
-    # Save metrics to CSV
-    metrics_file = args.metrics_csv
-    with open(metrics_file, mode="w", newline="") as file:
-        writer = csv.DictWriter(
-            file, fieldnames=["wer", "bleu", "model_dir", "dataset", "samples"]
+    if log_to_wandb:
+        log_metrics_to_wandb(
+            metrics,
+            model_dir=model_dir,
+            dataset_name=dataset_name,
+            split=split,
+            precision=precision,
+            sample_count=len(predictions),
+            run_name=wandb_run_name,
         )
-        writer.writeheader()
-        writer.writerow(
-            {
-                "wer": metrics["wer"],
-                "bleu": metrics["bleu"],
-                "model_dir": args.model_dir,
-                "dataset": (
-                    f"{args.dataset_name}:{args.dataset_config}"
-                    if args.dataset_config
-                    else args.dataset_name
-                ),
-                "samples": len(predictions),
-            }
-        )
-    print(f"📊 Saved metrics to: {metrics_file}")
 
-    # Log to wandb if configured
-    if os.getenv("WANDB_API_KEY"):
-        print(f"📡 Logging to wandb...")
-        # wandb.login(key=os.getenv("WANDB_API_KEY")) # Removed as API key should already be set
-        wandb.init(
-            project=os.getenv("WANDB_PROJECT"),
-            entity=os.getenv("WANDB_ENTITY"),
-            name=args.wandb_run_name,  # Use the new argument here
-            reinit=True,  # Ensure multiple runs can be started in a single session
-        )
-        wandb.log(
-            {
-                **metrics,
-                "model_dir": args.model_dir,
-                "dataset": args.dataset_name,
-                "samples": len(predictions),
-                "precision": args.precision,
-            }
-        )
-        wandb.finish()
-        print(f"✅ Logged to wandb")
-    else:
-        print(f"⚠️  Skipping wandb logging (no API key found)")
+    print(f"Evaluation metrics: {metrics}")
+    return metrics
 
-    print(f"\n✅ Evaluation complete!")
-    print(f"   📄 Examples: {args.examples_csv}")
-    print(f"   📊 Metrics: {metrics_file}")
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_dir", required=True, type=str)
+    parser.add_argument("--dataset_name", required=True, type=str)
+    parser.add_argument("--split", default="test", type=str)
+    parser.add_argument("--dataset_config", default=None, type=str)
+    parser.add_argument("--precision", default="float16", type=str)
+    parser.add_argument("--examples_csv", default="evaluation_examples.csv", type=str)
+    parser.add_argument("--metrics_csv", default="evaluation_metrics.csv", type=str)
+    parser.add_argument("--max_saved_examples", default=20, type=int)
+    parser.add_argument("--wandb_run_name", default="evaluation_run", type=str)
+    parser.add_argument("--disable_wandb", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    evaluate_model(
+        model_dir=args.model_dir,
+        dataset_name=args.dataset_name,
+        split=args.split,
+        dataset_config=args.dataset_config,
+        precision=args.precision,
+        examples_csv=args.examples_csv,
+        metrics_csv=args.metrics_csv,
+        max_saved_examples=args.max_saved_examples,
+        log_to_wandb=not args.disable_wandb,
+        wandb_run_name=args.wandb_run_name,
+    )
 
 
 if __name__ == "__main__":
