@@ -36,7 +36,7 @@ def _hash_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def load_openai_whisper(model_path: str, precision: str) -> whisper.Whisper:
+def load_openai_whisper(model_path: str) -> whisper.Whisper:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     candidate = model_path
     if os.path.isdir(model_path):
@@ -60,13 +60,6 @@ def load_openai_whisper(model_path: str, precision: str) -> whisper.Whisper:
         )
 
     model.load_state_dict(state_dict, strict=True)
-
-    precision = precision.lower()
-    if precision not in {"float16", "float32", "fp32"}:
-        raise ValueError(f"Unsupported precision: {precision}")
-
-    target_dtype = torch.float16 if precision == "float16" and device != "cpu" else torch.float32
-    model.to(dtype=target_dtype)
 
     print(f"Loaded Whisper checkpoint from {candidate}")
     print(f"Model weight SHA256 hash: {_hash_state_dict(model.state_dict())}")
@@ -100,14 +93,6 @@ def transcribe_dataset(
         audio_array = audio["array"]
         if not isinstance(audio_array, np.ndarray):
             audio_array = np.asarray(audio_array)
-
-        model_dtype = next(model.parameters()).dtype
-        if model_dtype == torch.float16:
-            if audio_array.dtype != np.float16:
-                audio_array = audio_array.astype(np.float16)
-        else:
-            if audio_array.dtype != np.float32:
-                audio_array = audio_array.astype(np.float32)
 
         result = model.transcribe(audio_array, temperature=0.0, verbose=False)
         prediction = result.get("text", "").strip()
@@ -218,7 +203,6 @@ def evaluate_model(
     dataset_name: str,
     split: str = "test",
     dataset_config: Optional[str] = None,
-    precision: str = "float16",
     examples_csv: Optional[str] = None,
     metrics_csv: Optional[str] = None,
     max_saved_examples: int = 20,
@@ -227,7 +211,7 @@ def evaluate_model(
 ) -> Dict[str, float]:
     """Evaluate a Whisper checkpoint on a streaming Hugging Face dataset."""
 
-    model = load_openai_whisper(model_dir, precision=precision)
+    model = load_openai_whisper(model_dir)
 
     load_kwargs = {"split": split, "streaming": True}
     if dataset_config:
@@ -256,7 +240,7 @@ def evaluate_model(
             model_dir=model_dir,
             dataset_name=dataset_name,
             split=split,
-            precision=precision,
+            precision="auto",
             sample_count=len(predictions),
             run_name=wandb_run_name,
         )
@@ -271,7 +255,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset_name", required=True, type=str)
     parser.add_argument("--split", default="test", type=str)
     parser.add_argument("--dataset_config", default=None, type=str)
-    parser.add_argument("--precision", default="float16", type=str)
     parser.add_argument("--examples_csv", default="evaluation_examples.csv", type=str)
     parser.add_argument("--metrics_csv", default="evaluation_metrics.csv", type=str)
     parser.add_argument("--max_saved_examples", default=20, type=int)

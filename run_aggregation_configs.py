@@ -71,7 +71,6 @@ def run_aggregation_and_eval():
                 dataset_name=EVALUATION_DATASET,
                 split=EVALUATION_SPLIT,
                 dataset_config=EVALUATION_CONFIG,
-                precision="float16",
                 examples_csv=str(examples_csv),
                 metrics_csv=str(metrics_csv),
             )
