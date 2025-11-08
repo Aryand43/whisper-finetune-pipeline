@@ -1,222 +1,109 @@
-# Whisper Fine-Tuning and Aggregation for Swiss German
+# Whisper Fine-Tuning & Aggregation Pipeline
 
-This repository fine-tunes OpenAI's Whisper model on Swiss German using synthetic long-form audio. It supports model aggregation from local checkpoints or directly from Weights & Biases (wandb), evaluation on public corpora, and low-resource quantization options.
+This repository orchestrates aggregation and evaluation of federated Whisper checkpoints targeting Swiss German speech. The codebase now works directly with OpenAI's `whisper` package, streams Hugging Face datasets without local TSVs, and evaluates models end-to-end without subprocess calls.
 
-## Features
+## Highlights
 
-- **Structure-preserving model aggregation**: Maintains nested state dict structure for proper model loading
-- **Wandb integration**: Download and aggregate models directly from wandb runs
-- **Whisper-large-v3-turbo support**: Uses the latest Whisper model as base
-- Synthetic long-form audio generation via VAD and overlap stitching
-- Timestamp-preserving segmentation
-- Evaluation on Swiss Parliament Corpus Re‑Imagined (SPC-R)
-- Support for float16 and int8 quantized inference
-- WER and BLEU computation with Weights & Biases logging
+- **OpenAI Whisper native workflow** – aggregate checkpoints and evaluate using `whisper.load_model` (`large-v3-turbo`).
+- **Streaming aggregation** – average large state dicts in constant memory.
+- **Streaming evaluation** – pull samples on-the-fly from `i4ds/spc_r` (or any HF dataset) without downloads.
+- **W&B optional** – runs can log artifacts/metrics when `WANDB_API_KEY` is present, otherwise operate offline.
+- **Single-process orchestration** – `run_aggregation_configs.py` iterates weight strategies and evaluates in-process.
 
-## Components
+## Key Scripts
 
-- `audio_utils.py`: Converts `.flac` clips to long-form `.wav` with consistent SHA256 hashes
-- `whisper_utils.py`: Fine-tunes Whisper using TSV files and audio directories
-- `model_aggregation.py`: **[UPDATED]** Structure-preserving averaging of multiple checkpoints
-- `average_runner.py`: Script to run model aggregation with custom weight distribution (local files)
-- `wandb_aggregator.py`: **[NEW]** Download and aggregate models directly from wandb runs
-- `evaluate_model.py`: **[UPDATED]** Flexible evaluation supporting aggregated models
-- `requirements.txt`: Includes core libraries and optional quantization dependencies
+- `model_aggregation.py` – streaming-friendly averaging utilities for Whisper `.pt` checkpoints.
+- `average_runner.py` – CLI wrapper that aggregates checkpoints and saves `model.pt` containing only the state dict.
+- `evaluate_model.py` – loads the base Whisper model, applies aggregated weights, and evaluates on a streaming HF dataset.
+- `run_aggregation_configs.py` – drives a set of predefined aggregation strategies and evaluations.
+- `audio_utils.py`, `whisper_utils.py` – helpers for audio preparation and fine-tuning (unchanged).
 
-## Directory Structure
+## Directory Layout
 
 ```
 whisper-finetune-pipeline/
-├── README.md
+├── average_runner.py
+├── evaluate_model.py
+├── model_aggregation.py
+├── run_aggregation_configs.py
 ├── audio_utils.py
-├── average_runner.py                 # Local checkpoint aggregation
-├── wandb_aggregator.py              # Wandb checkpoint aggregation [NEW]
-├── model_aggregation.py             # Core aggregation functions [UPDATED]
-├── evaluate_model.py                # Model evaluation [UPDATED]
 ├── whisper_utils.py
 ├── requirements.txt
-├── whisper-aggregated/              # Output directory
-│   ├── pytorch_model.bin
-│   ├── config.json
-│   ├── tokenizer.json
-│   └── other HuggingFace config files
-└── checkpoints/                     # Local checkpoints (optional)
-    ├── run1_last_model.pt
-    ├── run2_last_model.pt
-    └── run3_last_model.pt
+├── checkpoints/
+│   ├── wandering-river-4.pt
+│   ├── smart-smoke-5.pt
+│   ├── hearty-bee-7.pt
+│   └── eager-haze-6.pt
+└── whisper-aggregated/
+    └── <strategy>/model.pt
 ```
 
-## Quick Start
+Aggregated models are stored as plain PyTorch state dicts (`model.pt`). Loading always reconstructs the architecture from the official `whisper` package before weights are applied.
 
-### Option 1: Aggregate from Wandb Runs (Recommended)
+## Usage
 
-Download and aggregate models directly from wandb:
+### 1. Run predefined aggregation strategies
 
-```bash
-# Using wandb run paths
-python wandb_aggregator.py \
-    --wandb-runs entity/project/run1 entity/project/run2 entity/project/run3 \
-    --weights 0.4 0.3 0.3 \
-    --save-dir whisper-aggregated
-
-# Using full wandb URLs  
-python wandb_aggregator.py \
-    --wandb-urls \
-        "https://wandb.ai/aryan-dutt43-whisper-federated/whisper-federated/runs/yg5oaq50/files/55089672_output" \
-        "https://wandb.ai/aryan-dutt43-whisper-federated/whisper-federated/runs/abc123/files/output" \
-    --save-dir whisper-aggregated
-
-# Equal weights (default)
-python wandb_aggregator.py \
-    --wandb-runs entity/project/run1 entity/project/run2 \
-    --save-dir whisper-aggregated
+```
+python run_aggregation_configs.py
 ```
 
-### Option 2: Aggregate from Local Checkpoints
+The script checks for checkpoints, writes aggregated models under `whisper-aggregated/<strategy>/model.pt`, and evaluates each strategy on `i4ds/spc_r` (`test` split by default). CSV summaries (predictions + metrics) are produced per strategy.
 
-```bash
+### 2. Aggregate checkpoints manually
+
+```
 python average_runner.py \
-    --checkpoints checkpoints/run1_last_model.pt checkpoints/run2_last_model.pt \
-    --weights 0.6 0.4 \
-    --save-dir whisper-aggregated
+    --checkpoints checkpoints/wandering-river-4.pt checkpoints/smart-smoke-5.pt \
+    --weights 0.5 0.5 \
+    --save_dir whisper-aggregated/custom
 ```
 
-### Option 3: Evaluate Aggregated Model
+The output `whisper-aggregated/custom/model.pt` contains only the averaged state dict.
 
-```bash
+### 3. Evaluate a checkpoint directory
+
+```
 python evaluate_model.py \
-    --model-dir whisper-aggregated \
-    --dataset-name mozilla-foundation/common_voice_17_0 \
-    --dataset-config gsw \
-    --precision fp32
+    --model_dir whisper-aggregated/custom \
+    --dataset_name i4ds/spc_r \
+    --split test
 ```
 
-## Advanced Usage
+The evaluator streams audio, transcribes with temperature 0.0, writes sample predictions to `evaluation_examples.csv`, and saves WER/BLEU scores to `evaluation_metrics.csv`.
 
-### Wandb Integration Details
+## Checkpoint Format
 
-The `wandb_aggregator.py` script supports multiple input formats:
+- Saved files contain: `{tensor_name: tensor, ...}` (pure state dict).
+- Evaluation always calls `whisper.load_model("large-v3-turbo")` and then loads the state dict.
+- No additional metadata (`dims`, tokenizer files, etc.) is stored.
 
-1. **Run paths**: `entity/project/run_id`
-   ```bash
-   python wandb_aggregator.py --wandb-runs aryan-dutt43-whisper-federated/whisper-federated/yg5oaq50
-   ```
+## Dataset & Evaluation Notes
 
-2. **Full URLs**: Complete wandb URLs
-   ```bash
-   python wandb_aggregator.py --wandb-urls "https://wandb.ai/entity/project/runs/run_id/files/..."
-   ```
+- Default dataset: `i4ds/spc_r` (streaming). Override via CLI flags.
+- Audio columns are cast to HF `Audio` with 16 kHz sampling on the fly.
+- Evaluation keeps only a sample of examples (default 20) for CSV inspection.
+- Metrics: WER (`evaluate.load("wer")`) and BLEU (`sacrebleu`).
 
-3. **Custom checkpoint names**: If your checkpoints aren't named `last_model.pt`
-   ```bash
-   python wandb_aggregator.py \
-       --wandb-runs run1 run2 run3 \
-       --checkpoint-name best_model.pt
-   ```
+## W&B Logging (Optional)
 
-### Structure-Preserving Aggregation
-
-The aggregation now preserves the nested structure of PyTorch state dictionaries:
-
-- ✅ **Before**: `{"encoder": {"layer1": {"weight": tensor}}}`
-- ❌ **Old approach**: `{"encoder.layer1.weight": tensor}` (flattened - breaks loading)
-- ✅ **New approach**: `{"encoder": {"layer1": {"weight": tensor}}}` (preserved structure)
-
-This ensures the aggregated model can be properly loaded into the original architecture.
-
-### Model Compatibility
-
-- **Base model**: `openai/whisper-large-v3-turbo`
-- **Input checkpoints**: Any Whisper fine-tuned checkpoints with compatible architecture
-- **Output format**: HuggingFace compatible model directory with `save_pretrained()`
-
-## API Reference
-
-### Core Functions
-
-```python
-from model_aggregation import average_nested_state_dict, average_checkpoints_structured
-from wandb_aggregator import aggregate_wandb_checkpoints
-
-# Structure-preserving averaging
-avg_state_dict = average_nested_state_dict(state_dicts, weights)
-
-# Direct wandb aggregation
-save_dir = aggregate_wandb_checkpoints(
-    wandb_sources=["entity/project/run1", "entity/project/run2"],
-    weights=[0.6, 0.4],
-    save_dir="output",
-    checkpoint_name="last_model.pt"
-)
-```
+- Aggregation (`average_runner.py`): logs aggregated `model.pt` as an artifact when `WANDB_API_KEY` is configured.
+- Evaluation (`evaluate_model.py`): logs metrics with contextual metadata if W&B credentials are available.
+- Disable logging via `--disable_wandb` CLI flag.
 
 ## Requirements
 
-- Python 3.8+
-- transformers >= 4.41.1
-- torch >= 2.3.0
-- torchaudio
-- pydub >= 0.25.1
-- numpy < 2.0
-- pandas
-- evaluate
-- sacrebleu
-- wandb
-- bitsandbytes (optional for quantization)
-- accelerate (optional for quantization)
-
-## Installation
-
-```bash
-pip install -r requirements.txt
-wandb login  # Required for wandb integration
-```
-
-## Examples
-
-### Real-world Example with Wandb URLs
-
-```bash
-# Aggregate 3 models from wandb with custom weights
-python wandb_aggregator.py \
-    --wandb-urls \
-        "https://wandb.ai/aryan-dutt43-whisper-federated/whisper-federated/runs/yg5oaq50/files/55089672_output" \
-        "https://wandb.ai/aryan-dutt43-whisper-federated/whisper-federated/runs/abc123/files/output" \
-        "https://wandb.ai/aryan-dutt43-whisper-federated/whisper-federated/runs/def456/files/output" \
-    --weights 0.5 0.3 0.2 \
-    --save-dir ./final-whisper-model \
-    --checkpoint-name last_model.pt
-
-# Evaluate the aggregated model
-python evaluate_model.py \
-    --model-dir ./final-whisper-model \
-    --dataset-name mozilla-foundation/common_voice_17_0 \
-    --dataset-config gsw
-```
+- Python 3.9+
+- `torch`, `torchaudio`, `numpy`, `evaluate`, `sacrebleu`, `datasets`, `whisper`, `wandb` (optional)
+- Install with `pip install -r requirements.txt`
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **Wandb authentication**: Run `wandb login` before using wandb features
-2. **Missing checkpoints**: Ensure checkpoint name matches (default: `last_model.pt`)
-3. **Model loading errors**: Structure-preserving aggregation should resolve this
-4. **Memory issues**: Use `--precision float16` or `int8` for evaluation
-
-### Error Messages
-
-- `"Checkpoint 'last_model.pt' not found"`: Check checkpoint name with `--checkpoint-name`
-- `"Could not parse wandb URL"`: Ensure URL format is correct
-- `"Missing keys in averaged model"`: Normal warning, indicates some layers weren't in checkpoints
-
-## Contributing
-
-This pipeline uses structure-preserving aggregation to maintain model compatibility. When contributing:
-
-1. Preserve nested dictionary structures
-2. Test with real wandb checkpoints
-3. Ensure HuggingFace compatibility with `save_pretrained()`
+- **Missing checkpoints** – `run_aggregation_configs.py` will skip aggregation and report missing files.
+- **State dict mismatch** – ensure checkpoints were trained on `whisper-large-v3-turbo` before averaging.
+- **Dataset access** – set `HF_HOME` / `HF_DATASETS_CACHE` if streaming fails; authentication may be required for private datasets.
+- **OOM / crashes** – evaluation streams samples and avoids storing all predictions, but very long clips may still require more memory.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License. See `LICENSE` for details.
