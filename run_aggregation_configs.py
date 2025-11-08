@@ -52,7 +52,7 @@ def run_aggregation_and_eval():
             print("[SANITY CHECK] Would average checkpoints via aggregate_models()")
         else:
             print("Aggregating checkpoints via aggregate_models()")
-            aggregate_models(
+            checkpoint_path = aggregate_models(
                 checkpoints=CHECKPOINTS,
                 weights=weights,
                 save_dir=str(save_dir),
@@ -67,7 +67,7 @@ def run_aggregation_and_eval():
         else:
             print("Evaluating aggregated model via evaluate_model()")
             metrics = evaluate_model(
-                model_dir=str(save_dir),
+                model_dir=checkpoint_path,
                 dataset_name=EVALUATION_DATASET,
                 split=EVALUATION_SPLIT,
                 dataset_config=EVALUATION_CONFIG,

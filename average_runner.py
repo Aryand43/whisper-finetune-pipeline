@@ -5,23 +5,20 @@ from typing import Optional, Sequence
 
 import torch
 import wandb
-from transformers import WhisperForConditionalGeneration
+import whisper
 
 from model_aggregation import average_checkpoints
 
 
 def robust_hash_state_dict(state_dict):
-    if "model_state_dict" in state_dict:
-        state_dict = state_dict["model_state_dict"]
-
     def extract_tensor_bytes(d):
         tensor_bytes = []
         for key in sorted(d.keys()):
-            v = d[key]
-            if isinstance(v, dict):
-                tensor_bytes.extend(extract_tensor_bytes(v))
-            elif isinstance(v, torch.Tensor):
-                tensor_bytes.append(v.detach().cpu().numpy().tobytes())
+            value = d[key]
+            if isinstance(value, dict):
+                tensor_bytes.extend(extract_tensor_bytes(value))
+            elif isinstance(value, torch.Tensor):
+                tensor_bytes.append(value.detach().cpu().numpy().tobytes())
         return tensor_bytes
 
     all_bytes = b"".join(extract_tensor_bytes(state_dict))
@@ -37,7 +34,7 @@ def aggregate_models(
     wandb_run_name: str = "model_aggregation_run",
     log_to_wandb: bool = True,
 ) -> str:
-    """Average checkpoints and persist a Hugging Face-compatible Whisper model."""
+    """Average checkpoints and persist an OpenAI Whisper model checkpoint."""
 
     if not checkpoints:
         raise ValueError("No checkpoints provided for aggregation.")
@@ -67,33 +64,27 @@ def aggregate_models(
 
     print(f"Hash of aggregated state dict: {robust_hash_state_dict(avg_state_dict)}")
 
-    print("Loading base whisper-large-v3-turbo model...")
-    base_model = WhisperForConditionalGeneration.from_pretrained(
-        "openai/whisper-large-v3-turbo"
-    )
+    print("Loading base whisper-large-v3-turbo model (OpenAI)...")
+    base_model = whisper.load_model("large-v3-turbo", device="cpu")
 
     print("Loading averaged weights into model...")
     base_model.load_state_dict(avg_state_dict, strict=True)
 
     print(f"Saving aggregated model to: {save_dir}")
     os.makedirs(save_dir, exist_ok=True)
-    base_model.save_pretrained(save_dir)
+    checkpoint_path = os.path.join(save_dir, "model.pt")
+    torch.save(base_model.state_dict(), checkpoint_path)
 
-    from transformers import WhisperProcessor
-
-    processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3-turbo")
-    processor.save_pretrained(save_dir)
-
-    print(f"HF model and processor saved to: {save_dir}")
+    print(f"OpenAI Whisper checkpoint saved to: {checkpoint_path}")
     print("Model aggregation completed successfully!")
 
     if run is not None:
         artifact = wandb.Artifact(name="aggregated_whisper_model", type="model")
-        artifact.add_dir(save_dir)
+        artifact.add_file(checkpoint_path)
         run.log_artifact(artifact)
         wandb.finish()
 
-    return save_dir
+    return checkpoint_path
 
 
 def main():

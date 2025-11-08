@@ -4,91 +4,92 @@ import hashlib
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
+
+import argparse
+import csv
+import hashlib
+import os
+import re
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import evaluate
+import numpy as np
 import sacrebleu
 import torch
 import wandb
+import whisper
 from datasets import Audio, config as datasets_config, load_dataset
 from dotenv import load_dotenv
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
 load_dotenv()
 datasets_config.HF_DATASETS_AUDIO_BACKEND = "torchaudio"
 
 
-def robust_hash_state_dict(state_dict: Dict[str, Any]) -> str:
-    """Create a SHA256 hash for a (possibly nested) state dict."""
-
-    def extract_tensor_bytes(node: Dict[str, Any]) -> List[bytes]:
-        tensor_bytes: List[bytes] = []
-        for key in sorted(node.keys()):
-            value = node[key]
-            if isinstance(value, dict):
-                tensor_bytes.extend(extract_tensor_bytes(value))
-            elif isinstance(value, torch.Tensor):
-                tensor_bytes.append(value.detach().cpu().numpy().tobytes())
-        return tensor_bytes
-
-    flat_bytes = b"".join(extract_tensor_bytes(state_dict))
-    return hashlib.sha256(flat_bytes).hexdigest()
+def _hash_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
+    payload = b"".join(
+        state_dict[key].detach().cpu().numpy().tobytes()
+        for key in sorted(state_dict.keys())
+        if isinstance(state_dict[key], torch.Tensor)
+    )
+    return hashlib.sha256(payload).hexdigest()
 
 
-def load_model_and_pipeline(model_dir: str, precision: str = "float16"):
-    """Load Whisper model weights and return a ready-to-use ASR pipeline."""
+def load_openai_whisper(model_path: str, precision: str) -> whisper.Whisper:
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    candidate = model_path
+    if os.path.isdir(model_path):
+        candidate = os.path.join(model_path, "model.pt")
+        if not os.path.isfile(candidate):
+            raise FileNotFoundError(f"Expected model.pt inside {model_path}")
 
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    print("Loading base whisper-large-v3-turbo model (OpenAI)...")
+    model = whisper.load_model("large-v3-turbo", device=device)
+
+    print(f"Loading checkpoint weights from {candidate}...")
+    checkpoint = torch.load(candidate, map_location=device)
+
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    elif isinstance(checkpoint, dict):
+        state_dict = checkpoint
+    else:
+        raise TypeError(
+            "Checkpoint must be a state dict or contain 'model_state_dict' key."
+        )
+
+    model.load_state_dict(state_dict, strict=True)
+
     precision = precision.lower()
-    if precision not in {"float16", "fp32", "float32"}:
+    if precision not in {"float16", "float32", "fp32"}:
         raise ValueError(f"Unsupported precision: {precision}")
 
-    torch_dtype = torch.float16 if (precision == "float16" and device != "cpu") else torch.float32
+    target_dtype = torch.float16 if precision == "float16" and device != "cpu" else torch.float32
+    model.to(dtype=target_dtype)
 
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_dir,
-        torch_dtype=torch_dtype,
-        low_cpu_mem_usage=True,
-    )
-    processor = AutoProcessor.from_pretrained(model_dir)
-    model.to(device)
-
-    print(f"Loaded model from {model_dir}")
-    print(f"Model weight SHA256 hash: {robust_hash_state_dict(model.state_dict())}")
-
-    return pipeline(
-        task="automatic-speech-recognition",
-        model=model,
-        tokenizer=processor.tokenizer,
-        feature_extractor=processor.feature_extractor,
-        chunk_length_s=30,
-        batch_size=1,
-        torch_dtype=torch_dtype if device != "cpu" else torch.float32,
-        device=device,
-    )
+    print(f"Loaded Whisper checkpoint from {candidate}")
+    print(f"Model weight SHA256 hash: {_hash_state_dict(model.state_dict())}")
+    return model
 
 
 def normalize_text(text: str) -> str:
-    """Lowercase and strip punctuation/extra whitespace for stable metrics."""
-
     text = re.sub(r"[^\w\s]", " ", text.lower())
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
 def transcribe_dataset(
-    asr_pipe,
-    dataset: Iterable[Dict[str, Any]],
+    model: whisper.Whisper,
+    dataset: Iterable[Dict[str, object]],
     *,
     max_saved_examples: int = 20,
-) -> Tuple[List[str], List[str], List[Dict[str, Any]]]:
-    """Stream the dataset, collect predictions, and keep the first few examples."""
-
+) -> Tuple[List[str], List[str], List[Dict[str, object]]]:
     predictions: List[str] = []
     references: List[str] = []
-    saved_examples: List[Dict[str, Any]] = []
+    saved_examples: List[Dict[str, object]] = []
 
-    print("Transcribing samples (streaming)...")
+    print("Transcribing samples (streaming) with OpenAI Whisper...")
 
     for idx, sample in enumerate(dataset):
         audio = sample["audio"]
@@ -96,8 +97,20 @@ def transcribe_dataset(
         if reference is None:
             raise ValueError("Dataset sample is missing a reference transcript.")
 
-        result = asr_pipe({"array": audio["array"], "sampling_rate": audio["sampling_rate"]})
-        prediction = result["text"]
+        audio_array = audio["array"]
+        if not isinstance(audio_array, np.ndarray):
+            audio_array = np.asarray(audio_array)
+
+        model_dtype = next(model.parameters()).dtype
+        if model_dtype == torch.float16:
+            if audio_array.dtype != np.float16:
+                audio_array = audio_array.astype(np.float16)
+        else:
+            if audio_array.dtype != np.float32:
+                audio_array = audio_array.astype(np.float32)
+
+        result = model.transcribe(audio_array, temperature=0.0, verbose=False)
+        prediction = result.get("text", "").strip()
 
         predictions.append(prediction)
         references.append(reference)
@@ -120,7 +133,9 @@ def transcribe_dataset(
     return predictions, references, saved_examples
 
 
-def save_examples_to_csv(saved_examples: List[Dict[str, Any]], output_path: Optional[str]) -> None:
+def save_examples_to_csv(
+    saved_examples: List[Dict[str, object]], output_path: Optional[str]
+) -> None:
     if not output_path or not saved_examples:
         return
 
@@ -212,7 +227,7 @@ def evaluate_model(
 ) -> Dict[str, float]:
     """Evaluate a Whisper checkpoint on a streaming Hugging Face dataset."""
 
-    asr_pipe = load_model_and_pipeline(model_dir, precision=precision)
+    model = load_openai_whisper(model_dir, precision=precision)
 
     load_kwargs = {"split": split, "streaming": True}
     if dataset_config:
@@ -223,7 +238,7 @@ def evaluate_model(
     dataset = dataset.cast_column("audio", Audio(sampling_rate=16000))
 
     predictions, references, saved_examples = transcribe_dataset(
-        asr_pipe,
+        model,
         dataset,
         max_saved_examples=max_saved_examples,
     )

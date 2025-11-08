@@ -3,8 +3,6 @@ from typing import List, Optional
 
 import torch
 
-from convert_openai_to_hf import convert_openai_whisper_to_tfms
-
 
 # -----------------------------
 # Checkpoint Averaging
@@ -14,7 +12,7 @@ def average_checkpoints(
     weights: Optional[List[float]] = None,
     use_float64: bool = True,
 ) -> OrderedDict:
-    """Average checkpoint weights without storing every state dict in memory."""
+    """Average OpenAI Whisper checkpoints without loading them all at once."""
 
     assert checkpoint_paths, "need at least one checkpoint"
 
@@ -27,21 +25,22 @@ def average_checkpoints(
     assert abs(weight_total - 1.0) < 1e-6, "weights must sum to 1"
 
     def _load_state_dict(path: str) -> OrderedDict:
-        print(f"Loading checkpoint: {path}")
-        model, _, _ = convert_openai_whisper_to_tfms(path, "temp_converted_model")
-        state_dict = model.state_dict()
-        for key, value in state_dict.items():
+        checkpoint = torch.load(path, map_location="cpu")
+        state = checkpoint.get("model_state_dict", checkpoint)
+        ordered = OrderedDict()
+        for key, value in state.items():
             if isinstance(value, torch.Tensor):
-                state_dict[key] = value.cpu()
-        del model
-        return state_dict
+                ordered[key] = value.cpu()
+            else:
+                ordered[key] = value
+        return ordered
 
     ref_state = _load_state_dict(checkpoint_paths[0])
     ref_keys = list(ref_state.keys())
 
     acc = {}
     for key, tensor in ref_state.items():
-        if tensor.is_floating_point():
+        if isinstance(tensor, torch.Tensor) and tensor.is_floating_point():
             dtype = torch.float64 if use_float64 else torch.float32
             acc[key] = torch.zeros_like(tensor, dtype=dtype)
         else:
@@ -51,16 +50,14 @@ def average_checkpoints(
         state_dict = ref_state if idx == 0 else _load_state_dict(checkpoint_path)
 
         if idx > 0:
-            assert set(state_dict.keys()) == set(
-                ref_keys
-            ), f"key mismatch at index {idx}"
+            assert set(state_dict.keys()) == set(ref_keys), f"key mismatch at index {idx}"
             for key in ref_keys:
-                assert (
-                    state_dict[key].shape == ref_state[key].shape
-                ), f"shape mismatch for {key} at index {idx}"
+                assert state_dict[key].shape == ref_state[key].shape, (
+                    f"shape mismatch for {key} at index {idx}"
+                )
 
         for key, tensor in state_dict.items():
-            if tensor.is_floating_point():
+            if isinstance(tensor, torch.Tensor) and tensor.is_floating_point():
                 acc[key].add_(tensor.to(acc[key].dtype), alpha=weight)
 
         if idx > 0:
@@ -68,9 +65,9 @@ def average_checkpoints(
 
     out = OrderedDict()
     for key, tensor in ref_state.items():
-        if tensor.is_floating_point():
+        if isinstance(tensor, torch.Tensor) and tensor.is_floating_point():
             out[key] = acc[key].to(dtype=tensor.dtype)
         else:
-            out[key] = tensor.clone()
+            out[key] = tensor.clone() if isinstance(tensor, torch.Tensor) else tensor
 
     return out
