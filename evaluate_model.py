@@ -62,7 +62,7 @@ def load_model_and_pipeline(model_dir: str, precision: str = "float16"):
         tokenizer=processor.tokenizer,
         feature_extractor=processor.feature_extractor,
         chunk_length_s=30,
-        batch_size=8,
+        batch_size=1,
         torch_dtype=torch_dtype if device != "cpu" else torch.float32,
         device=device,
     )
@@ -79,6 +79,7 @@ def normalize_text(text: str) -> str:
 def transcribe_dataset(
     asr_pipe,
     dataset: Iterable[Dict[str, Any]],
+    *,
     max_saved_examples: int = 20,
 ) -> Tuple[List[str], List[str], List[Dict[str, Any]]]:
     """Stream the dataset, collect predictions, and keep the first few examples."""

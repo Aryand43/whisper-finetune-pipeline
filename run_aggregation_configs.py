@@ -1,6 +1,6 @@
-import subprocess
 from pathlib import Path
 
+from average_runner import aggregate_models
 from evaluate_model import evaluate_model
 
 AGGREGATION_STRATEGIES = [
@@ -48,33 +48,22 @@ def run_aggregation_and_eval():
         save_dir = BASE_SAVE_DIR / name
         save_dir.mkdir(exist_ok=True)
 
-        # Aggregate command
-        aggregate_cmd = [
-            "python",
-            "average_runner.py",
-            "--checkpoints",
-            *CHECKPOINTS,
-            "--weights",
-            *[str(w) for w in weights],
-            "--save_dir",
-            str(save_dir),
-        ]
-
         if missing_checkpoints:
-            print(
-                f"[SANITY CHECK] Would run aggregation command:\n{' '.join(aggregate_cmd)}"
-            )
+            print("[SANITY CHECK] Would average checkpoints via aggregate_models()")
         else:
-            print(f"Running aggregation command:\n{' '.join(aggregate_cmd)}")
-            subprocess.run(aggregate_cmd, check=True)
+            print("Aggregating checkpoints via aggregate_models()")
+            aggregate_models(
+                checkpoints=CHECKPOINTS,
+                weights=weights,
+                save_dir=str(save_dir),
+                log_to_wandb=False,
+            )
 
         examples_csv = save_dir / "evaluation_examples.csv"
         metrics_csv = save_dir / "evaluation_metrics.csv"
 
         if missing_checkpoints:
-            print(
-                "[SANITY CHECK] Would run evaluation via evaluate_model()",
-            )
+            print("[SANITY CHECK] Would run evaluation via evaluate_model()")
         else:
             print("Evaluating aggregated model via evaluate_model()")
             metrics = evaluate_model(

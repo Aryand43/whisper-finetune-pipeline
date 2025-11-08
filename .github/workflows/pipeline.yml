@@ -1,10 +1,12 @@
 name: Whisper Pipeline CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "Manual run only (CI auto-triggers disabled)"
+        required: false
+        default: ""
 
 jobs:
   ci:
