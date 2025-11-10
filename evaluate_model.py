@@ -4,15 +4,7 @@ import hashlib
 import os
 import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
-
-import argparse
-import csv
-import hashlib
-import os
-import re
-from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import evaluate
 import numpy as np
@@ -168,34 +160,45 @@ def evaluate_metrics(predictions: List[str], references: List[str]) -> Dict[str,
 
 
 def log_metrics_to_wandb(
+    run: Any,
     metrics: Dict[str, float],
     model_dir: str,
     dataset_name: str,
     split: str,
-    precision: str,
+    samples: Sequence[Dict[str, object]],
     sample_count: int,
-    run_name: Optional[str],
 ) -> None:
-    if not os.getenv("WANDB_API_KEY"):
+    if run is None:
         return
+    payload = {
+        "model_dir": model_dir,
+        "dataset": dataset_name,
+        "split": split,
+        "samples": sample_count,
+    }
+    payload.update({key: float(value) for key, value in metrics.items()})
 
-    wandb.init(
-        project=os.getenv("WANDB_PROJECT"),
-        entity=os.getenv("WANDB_ENTITY"),
-        name=run_name,
-        reinit=True,
+    table = wandb.Table(
+        columns=[
+            "index",
+            "prediction_raw",
+            "reference_raw",
+            "prediction_normalized",
+            "reference_normalized",
+        ]
     )
-    wandb.log(
-        {
-            **metrics,
-            "model_dir": model_dir,
-            "dataset": dataset_name,
-            "split": split,
-            "precision": precision,
-            "samples": sample_count,
-        }
-    )
-    wandb.finish()
+    for row in samples:
+        table.add_data(
+            row.get("index"),
+            row.get("prediction_raw"),
+            row.get("reference_raw"),
+            row.get("prediction_normalized"),
+            row.get("reference_normalized"),
+        )
+
+    payload["examples"] = table
+
+    run.log(payload)
 
 
 def evaluate_model(
@@ -206,8 +209,7 @@ def evaluate_model(
     examples_csv: Optional[str] = None,
     metrics_csv: Optional[str] = None,
     max_saved_examples: int = 20,
-    log_to_wandb: bool = True,
-    wandb_run_name: Optional[str] = None,
+    wandb_run: Optional[Any] = None,
 ) -> Dict[str, float]:
     """Evaluate a Whisper checkpoint on a streaming Hugging Face dataset."""
 
@@ -234,16 +236,15 @@ def evaluate_model(
     save_examples_to_csv(saved_examples, examples_csv)
     write_metrics_to_csv(metrics, metrics_csv)
 
-    if log_to_wandb:
-        log_metrics_to_wandb(
-            metrics,
-            model_dir=model_dir,
-            dataset_name=dataset_name,
-            split=split,
-            precision="auto",
-            sample_count=len(predictions),
-            run_name=wandb_run_name,
-        )
+    log_metrics_to_wandb(
+        wandb_run,
+        metrics,
+        model_dir=model_dir,
+        dataset_name=dataset_name,
+        split=split,
+        samples=saved_examples,
+        sample_count=len(predictions),
+    )
 
     print(f"Evaluation metrics: {metrics}")
     return metrics
@@ -259,24 +260,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metrics_csv", default="evaluation_metrics.csv", type=str)
     parser.add_argument("--max_saved_examples", default=20, type=int)
     parser.add_argument("--wandb_run_name", default="evaluation_run", type=str)
-    parser.add_argument("--disable_wandb", action="store_true")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    run = wandb.init(
+        entity="aryan-dutt43-whisper-federated",
+        project="whisper-finetune-pipeline",
+        job_type="evaluation",
+        name=args.wandb_run_name,
+        reinit=True,
+    )
     evaluate_model(
         model_dir=args.model_dir,
         dataset_name=args.dataset_name,
         split=args.split,
         dataset_config=args.dataset_config,
-        precision=args.precision,
         examples_csv=args.examples_csv,
         metrics_csv=args.metrics_csv,
         max_saved_examples=args.max_saved_examples,
-        log_to_wandb=not args.disable_wandb,
-        wandb_run_name=args.wandb_run_name,
+        wandb_run=run,
     )
+    if run is not None:
+        run.finish()
 
 
 if __name__ == "__main__":

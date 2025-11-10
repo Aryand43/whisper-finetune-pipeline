@@ -1,4 +1,7 @@
+import json
 from pathlib import Path
+
+import wandb
 
 from average_runner import aggregate_models
 from evaluate_model import evaluate_model
@@ -39,6 +42,25 @@ def run_aggregation_and_eval():
             print(f"   {c}")
         print("The script will skip actual aggregation/evaluation for now.\n")
 
+    wandb.init(
+        entity="aryan-dutt43-whisper-federated",
+        project="whisper-finetune-pipeline",
+        name="aggregation_configs",
+        job_type="aggregation",
+        reinit=True,
+    )
+    wandb.config.update(
+        {
+            "dataset": EVALUATION_DATASET,
+            "dataset_config": EVALUATION_CONFIG,
+            "split": EVALUATION_SPLIT,
+            "checkpoint_count": len(CHECKPOINTS),
+        }
+    )
+
+    results = []
+    artifacts = []
+
     for strategy in AGGREGATION_STRATEGIES:
         name = strategy["name"]
         weights = strategy["weights"]
@@ -73,13 +95,62 @@ def run_aggregation_and_eval():
                 dataset_config=EVALUATION_CONFIG,
                 examples_csv=str(examples_csv),
                 metrics_csv=str(metrics_csv),
+                wandb_run=None,
             )
             print(f"   Metrics: {metrics}")
             print(f"   Examples CSV: {examples_csv}")
             print(f"   Metrics CSV: {metrics_csv}")
 
+            results.append(
+                {
+                    "strategy": name,
+                    "weights": weights,
+                    "wer": float(metrics.get("wer", float("nan"))),
+                    "bleu": float(metrics.get("bleu", float("nan"))),
+                    "checkpoint_path": str(checkpoint_path),
+                    "examples_csv": str(examples_csv),
+                    "metrics_csv": str(metrics_csv),
+                }
+            )
+
+            if wandb.run is not None:
+                artifact = wandb.Artifact(name=f"{name}-model", type="model")
+                artifact.add_file(checkpoint_path, name=f"{name}.pt")
+                artifacts.append(artifact)
+
         print(f"   Completed strategy: {name}")
         print(f"   Aggregated model: {save_dir}")
+
+    if wandb.run is not None and results:
+        table = wandb.Table(
+            columns=[
+                "strategy",
+                "weights",
+                "wer",
+                "bleu",
+                "checkpoint_path",
+                "examples_csv",
+                "metrics_csv",
+            ]
+        )
+        for item in results:
+            table.add_data(
+                item["strategy"],
+                json.dumps(item["weights"]),
+                item["wer"],
+                item["bleu"],
+                item["checkpoint_path"],
+                item["examples_csv"],
+                item["metrics_csv"],
+            )
+
+        wandb.log({"aggregation/summary": table})
+
+        for artifact in artifacts:
+            wandb.log_artifact(artifact)
+
+    if wandb.run is not None:
+        wandb.finish()
 
 
 if __name__ == "__main__":

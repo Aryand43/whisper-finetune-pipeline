@@ -1,7 +1,7 @@
 import argparse
 import hashlib
 import os
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import torch
 import wandb
@@ -31,8 +31,7 @@ def aggregate_models(
     *,
     save_dir: str = "whisper-aggregated",
     use_float64: bool = False,
-    wandb_run_name: str = "model_aggregation_run",
-    log_to_wandb: bool = True,
+    wandb_run: Optional[Any] = None,
 ) -> str:
     """Average checkpoints and persist an OpenAI Whisper model checkpoint."""
 
@@ -44,16 +43,6 @@ def aggregate_models(
 
     if len(weights) != len(checkpoints):
         raise ValueError("Weights must match checkpoints")
-
-    run = None
-    if log_to_wandb:
-        run = wandb.init(
-            entity="aryan-dutt43-whisper-federated",
-            project="whisper-finetune-pipeline",
-            job_type="model_aggregation",
-            name=wandb_run_name,
-            reinit=True,
-        )
 
     print("Averaging checkpoints...")
     avg_state_dict = average_checkpoints(
@@ -78,11 +67,10 @@ def aggregate_models(
     print(f"OpenAI Whisper checkpoint saved to: {checkpoint_path}")
     print("Model aggregation completed successfully!")
 
-    if run is not None:
+    if wandb_run is not None:
         artifact = wandb.Artifact(name="aggregated_whisper_model", type="model")
         artifact.add_file(checkpoint_path)
-        run.log_artifact(artifact)
-        wandb.finish()
+        wandb_run.log_artifact(artifact)
 
     return checkpoint_path
 
@@ -105,27 +93,26 @@ def main():
         action="store_true",
         help="Use float64 for accumulation during averaging",
     )
-    parser.add_argument(
-        "--wandb_run_name",
-        type=str,
-        default="model_aggregation_run",
-        help="Name for the Weights & Biases run",
-    )
-    parser.add_argument(
-        "--disable_wandb",
-        action="store_true",
-        help="Disable logging aggregated model to Weights & Biases",
-    )
     args = parser.parse_args()
+
+    run = wandb.init(
+        entity="aryan-dutt43-whisper-federated",
+        project="whisper-finetune-pipeline",
+        job_type="model_aggregation",
+        name="model_aggregation_run",
+        reinit=True,
+    )
 
     aggregate_models(
         args.checkpoints,
         args.weights,
         save_dir=args.save_dir,
         use_float64=args.use_float64,
-        wandb_run_name=args.wandb_run_name,
-        log_to_wandb=not args.disable_wandb,
+        wandb_run=run,
     )
+
+    if run is not None:
+        run.finish()
 
 
 if __name__ == "__main__":
